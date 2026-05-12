@@ -1,0 +1,23 @@
+name: nightly-rhodawk-sweep
+schedule: "0 2 * * *"          # 2 AM every night
+platform: telegram
+description: >
+  Run Rhodawk against the next 3 repos from /data/target_list.json.
+  For each: clone → bounded-run → push PR if tests pass.
+  Report results to Telegram with commit hashes and failure summaries.
+task: |
+  REPOS=$(python3 -c "
+  import json, pathlib
+  repos = json.loads(pathlib.Path('/data/target_list.json').read_text())
+  done  = set(pathlib.Path('/data/completed_repos.txt').read_text().splitlines()) \
+          if pathlib.Path('/data/completed_repos.txt').exists() else set()
+  next3 = [r for r in repos if r not in done][:3]
+  print('\n'.join(next3))
+  ")
+  for REPO in $REPOS; do
+    python3 /app/skills/jcode_swarm/spawn.py \
+      --repos <(echo "[\"$REPO\"]") \
+      --task "Run pytest, fix all failures, push PR" \
+      --workers 1
+    echo $REPO >> /data/completed_repos.txt
+  done

@@ -1,0 +1,126 @@
+#!/bin/bash
+# jcode — scaffolding swarm wrapper for Rhodawk Hermes
+# Calls DigitalOcean Inference (OpenAI-compatible) to scaffold files.
+# Installed at /usr/local/bin/jcode by Dockerfile.vps.
+#
+# Usage:
+#   jcode run --message "Create app.py: Flask app with GET /ping" [--workdir /tmp/out]
+#   jcode --version
+#   jcode --help
+#
+# Env vars (all exported by init_and_start.sh):
+#   OPENAI_API_KEY or DO_INFERENCE_API_KEY
+#   OPENAI_BASE_URL or DO_INFERENCE_BASE_URL
+#   JCODE_MODEL or OPENAI_MODEL (default: deepseek-v4-pro)
+set -e
+
+VERSION="1.0.0-rhodawk"
+
+MODEL="${JCODE_MODEL:-${OPENAI_MODEL:-deepseek-v4-pro}}"
+BASE_URL="${OPENAI_BASE_URL:-${DO_INFERENCE_BASE_URL:-}}"
+API_KEY="${OPENAI_API_KEY:-${DO_INFERENCE_API_KEY:-}}"
+WORKDIR="${JCODE_WORKDIR:-/tmp/jcode_out}"
+MESSAGE=""
+SUBCOMMAND=""
+
+while [[ $# -gt 0 ]]; do
+  case $1 in
+    run)       SUBCOMMAND="run"; shift ;;
+    serve)     echo "[jcode] serve mode: sleeping (no daemon needed for wrapper)"; exec sleep infinity ;;
+    --version) echo "jcode $VERSION (Rhodawk wrapper → $MODEL)"; exit 0 ;;
+    --help)    echo "Usage: jcode run --message \"...\" [--workdir DIR]"; exit 0 ;;
+    --message) MESSAGE="$2"; shift 2 ;;
+    --workdir) WORKDIR="$2"; shift 2 ;;
+    *)         shift ;;
+  esac
+done
+
+if [ -z "$MESSAGE" ]; then
+  echo "jcode: --message required" >&2
+  exit 1
+fi
+if [ -z "$BASE_URL" ]; then
+  echo "jcode: OPENAI_BASE_URL or DO_INFERENCE_BASE_URL not set" >&2
+  exit 1
+fi
+if [ -z "$API_KEY" ]; then
+  echo "jcode: OPENAI_API_KEY or DO_INFERENCE_API_KEY not set" >&2
+  exit 1
+fi
+
+mkdir -p "$WORKDIR"
+
+SYSTEM_PROMPT="You are a code scaffolding generator. Output ONLY file contents with file paths as comment headers. Format exactly:
+# FILE: relative/path/to/file.py
+<file contents here>
+# FILE: relative/path/to/another.py
+<file contents here>
+Generate all files needed to satisfy the request. No explanations. No markdown fences."
+
+python3 - << PYEOF
+import json, os, sys, re, urllib.request, urllib.error
+
+base_url = os.environ.get('OPENAI_BASE_URL') or os.environ.get('DO_INFERENCE_BASE_URL', '')
+api_key  = os.environ.get('OPENAI_API_KEY') or os.environ.get('DO_INFERENCE_API_KEY', '')
+model    = os.environ.get('JCODE_MODEL') or os.environ.get('OPENAI_MODEL', 'deepseek-v4-pro')
+workdir  = '$WORKDIR'
+message  = '''$MESSAGE'''
+
+payload = json.dumps({
+    'model': model,
+    'messages': [
+        {'role': 'system', 'content': """$SYSTEM_PROMPT"""},
+        {'role': 'user',   'content': message},
+    ],
+    'temperature': 0.3,
+    'max_tokens': 8192,
+}).encode()
+
+req = urllib.request.Request(
+    base_url.rstrip('/') + '/chat/completions',
+    data=payload,
+    headers={
+        'Content-Type': 'application/json',
+        'Authorization': f'Bearer {api_key}',
+    },
+    method='POST',
+)
+
+try:
+    with urllib.request.urlopen(req, timeout=120) as resp:
+        data = json.loads(resp.read())
+except urllib.error.HTTPError as e:
+    print(f'jcode: HTTP {e.code} from inference endpoint', file=sys.stderr)
+    print(e.read().decode(), file=sys.stderr)
+    sys.exit(1)
+
+content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+if not content:
+    print('jcode: empty response from model', file=sys.stderr)
+    sys.exit(1)
+
+pattern = re.compile(r'^#\s*FILE:\s*(.+)$')
+current_file = None
+current_lines = []
+
+def flush(path, lines):
+    if not path or not lines:
+        return
+    fpath = os.path.join(workdir, path.lstrip('/'))
+    os.makedirs(os.path.dirname(fpath) or workdir, exist_ok=True)
+    with open(fpath, 'w') as f:
+        f.write('\n'.join(lines).strip() + '\n')
+    print(f'jcode: wrote {fpath} ({len(lines)} lines)')
+
+for line in content.split('\n'):
+    m = pattern.match(line)
+    if m:
+        flush(current_file, current_lines)
+        current_file = m.group(1).strip()
+        current_lines = []
+    elif current_file is not None:
+        current_lines.append(line)
+
+flush(current_file, current_lines)
+print(f'jcode: done — files in {workdir}')
+PYEOF

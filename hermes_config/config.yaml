@@ -1,0 +1,64 @@
+# hermes-agent config.yaml — Rhodawk AI v7.1
+# Path: $HERMES_HOME/config.yaml  (copied by init_and_start.sh)
+#
+# API keys come from environment variables, NOT from this file:
+#   OPENAI_API_KEY / OPENAI_BASE_URL  — primary (set to DO Inference in init_and_start.sh)
+#   OPENROUTER_API_KEY                — fallback if OPENAI vars not set
+#
+# Schema follows cli-config.yaml.example from NousResearch/hermes-agent.
+# Unknown keys are silently ignored; wrong keys are NOT silently corrected.
+
+# Model: hermes-agent resolves the model via env var OPENAI_MODEL or the
+# model.default key below.  The base_url + api_key come from OPENAI_BASE_URL
+# + OPENAI_API_KEY (set in init_and_start.sh → HERMES_HOME/.env).
+model:
+  default: "${HERMES_MODEL}"
+
+# Terminal tool — runs commands locally inside the container.
+terminal:
+  backend: "local"
+  cwd: "."
+  timeout: 7200
+  lifetime_seconds: 7200
+  docker_mount_cwd_to_workspace: false
+
+# Persistent memory — agent notes + user profile.
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 4000
+  user_char_limit: 2000
+  nudge_interval: 10
+  flush_min_turns: 6
+
+# Context compression — auto-shrinks long conversations before the context window fills.
+compression:
+  enabled: true
+  threshold: 0.50
+  target_ratio: 0.20
+  protect_last_n: 20
+
+# Display — tool progress visible in Telegram messages.
+display:
+  tool_progress: "all"
+  streaming: true
+  interim_assistant_messages: true
+  cleanup_progress: false
+  compact: false
+  show_reasoning: false
+  busy_input_mode: interrupt
+  background_process_notifications: all
+
+# YOLO mode — no tool-approval prompts.  Required for autonomous 24/7 operation.
+# Equivalent to the HERMES_YOLO_MODE=1 env var set in supervisord.conf.
+yolo: true
+
+# Session reset policy for Telegram messages.
+session_reset:
+  on_command: "/new"
+  on_platform_disconnect: false
+
+# MCP servers — populated at runtime by init_and_start.sh after env-var expansion.
+# The mcp_servers key is the authoritative MCP config location for hermes-agent.
+# Do NOT add static keys here; init_and_start.sh writes the expanded dict below.
+mcp_servers: {}

@@ -1,0 +1,27 @@
+{
+  "agentModels": {
+    "do-fast": {
+      "base_url": "https://inference.do-ai.run/v1",
+      "api_key": "${DO_INFERENCE_API_KEY}",
+      "model": "deepseek-r1-distill-llama-70b"
+    },
+    "do-coder": {
+      "base_url": "https://inference.do-ai.run/v1",
+      "api_key": "${DO_INFERENCE_API_KEY}",
+      "model": "deepseek-v4-pro"
+    },
+    "do-review": {
+      "base_url": "https://inference.do-ai.run/v1",
+      "api_key": "${DO_INFERENCE_API_KEY}",
+      "model": "kimi-k2.6"
+    }
+  },
+  "agentRouting": {
+    "Explore":         "do-fast",
+    "Plan":            "do-coder",
+    "Code":            "do-coder",
+    "Review":          "do-review",
+    "general-purpose": "do-coder",
+    "default":         "do-coder"
+  }
+}

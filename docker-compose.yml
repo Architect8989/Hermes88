@@ -1,0 +1,82 @@
+# =============================================================================
+# Rhodawk AI — Hermes v7.0 (CEO-Grade Second Brain)
+# docker compose deployment
+#
+# Deploy:
+#   cp .env.example .env && nano .env   # fill in all required secrets
+#   docker compose up -d --build
+#
+# Manage:
+#   docker compose logs -f              # stream logs
+#   docker compose ps                   # container status
+#   docker compose restart              # restart bot
+#   docker compose down                 # stop
+#   docker compose up -d --build       # update after git pull
+# =============================================================================
+
+services:
+  hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.vps
+    image: rhodawk-hermes:latest
+    container_name: hermes
+    env_file: .env
+    environment:
+      # Model assignments — override whatever init_and_start.sh sets so
+      # docker compose up -d (no rebuild) picks these up immediately.
+      - HERMES_MODEL=deepseek-v4-pro
+      - OPENCLAUDE_MODEL=deepseek-r1-distill-llama-70b
+      - JCODE_MODEL=kimi-k2.6
+      # Camofox is a sibling container — never localhost from inside hermes
+      - CAMOFOX_HOST=camofox
+      - CAMOFOX_PORT=9377
+    volumes:
+      # Persists across restarts: SQLite memory DB, hermes config, sessions, logs
+      - hermes-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - supervisorctl
+        - -c
+        - /etc/supervisor/conf.d/rhodawk.conf
+        - status
+        - hermes-gateway
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  camofox:
+    image: node:20-slim
+    container_name: camofox
+    working_dir: /app
+    command: >
+      bash -c "apt-get update -q && apt-get install -y -q git &&
+               git clone --depth 1 https://github.com/jo-inc/camofox-browser . &&
+               npm install && npm start"
+    ports:
+      - "9377:9377"
+    environment:
+      - CAMOFOX_ACCESS_KEY=${CAMOFOX_ACCESS_KEY}
+      - CAMOFOX_PORT=9377
+    restart: unless-stopped
+    volumes:
+      - camofox_data:/home/node/.camofox
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  hermes-data:
+    driver: local
+  camofox_data:
+    driver: local

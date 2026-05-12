@@ -1,0 +1,88 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# hermes-agent gateway configuration — Rhodawk AI v7.0 (CEO-Grade Second Brain)
+# Path: /data/.hermes/gateway.yaml  (copied here by init_and_start.sh)
+#
+# This file configures hermes-agent's built-in gateway runner.
+# It is loaded by `python3 -m gateway.run` at startup.
+# All API keys come from environment (exported in init_and_start.sh).
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Agent model routing ────────────────────────────────────────────────────────
+agent:
+  # Primary: DO Inference deepseek-r1-distill-llama-70b (deep reasoning + tool calling)
+  base_url: "${DO_INFERENCE_BASE_URL}"
+  api_key:  "${DO_INFERENCE_API_KEY}"
+  model:    "${HERMES_MODEL}"
+
+  # Fallback: DO Inference lighter model (kicks in on 429/503)
+  fallback_base_url: "${DO_INFERENCE_BASE_URL}"
+  fallback_api_key:  "${DO_INFERENCE_API_KEY}"
+  fallback_model:    "${DO_FALLBACK_MODEL}"
+
+  # Behaviour
+  max_tokens:      16384          # WAS: 8192 — more room for complex reasoning
+  temperature:     0.05           # WAS: 0.2 — lower = deterministic tool dispatch
+  yolo_mode:       true           # HERMES_YOLO_MODE — no tool approval prompts
+  timeout:         900            # WAS: 600 — 15 min for long research tasks
+  gateway_timeout: 3600           # WAS: 1800 — allow hour-long autonomous tasks
+
+  # Soul / persona
+  soul_path: "/data/.hermes/SOUL.md"
+
+  # Context management
+  context_window_limit: 60000     # WAS: 28000 — modern deepseek supports this
+  max_history_messages: 50        # WAS: 30 — longer session memory
+
+  # Skills + Memory + Sessions
+  skills_dir:   "/data/.hermes/skills"
+  memory_dir:   "/data/.hermes/memories"
+  sessions_dir: "/data/.hermes/sessions"
+
+# ── Telegram platform ──────────────────────────────────────────────────────────
+platforms:
+  telegram:
+    enabled: true
+    token:   "${TELEGRAM_BOT_TOKEN}"
+    polling: true
+    parse_mode: null
+    max_message_length: 4000
+    text_batch_delay_seconds: 0.6
+    reply_to_mode: first
+
+# ── Tool configuration ─────────────────────────────────────────────────────────
+tools:
+  terminal:
+    env: local
+    max_foreground_timeout: 7200  # WAS: 3600 — 2 hour tasks allowed
+    passthrough_env:
+      - GITHUB_PAT
+      - HF_TOKEN
+      - DO_INFERENCE_API_KEY
+      - DO_INFERENCE_BASE_URL
+      - HERMES_MODEL
+      - OPENCLAUDE_MODEL
+      - JCODE_MODEL
+      - DO_FALLBACK_MODEL
+      - OPENAI_API_KEY
+      - OPENAI_BASE_URL
+      - OPENAI_MODEL
+      - CLAUDE_CODE_USE_OPENAI
+      - HERMES_YOLO_MODE
+      - BRAVE_API_KEY
+      - CAMOFOX_ACCESS_KEY
+  web_fetch:
+    enabled: true
+    timeout: 30
+  web_search:
+    enabled: true
+
+# ── Session management ─────────────────────────────────────────────────────────
+sessions:
+  reset_on_command: true
+  persist: true
+  idle_evict_seconds: 86400
+
+# ── Logging ────────────────────────────────────────────────────────────────────
+logging:
+  level: info
+  format: text

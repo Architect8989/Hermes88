@@ -1,0 +1,59 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Rhodawk AI — Hermes requirements.txt
+# All Python runtime dependencies for the full multi-agent swarm.
+# Install: pip3 install -r requirements.txt
+#
+# Agents:
+#   hermes-agent  — orchestration engine + Telegram gateway (NousResearch)
+#   openclaude    — gRPC coding agent (grpcio stack)
+#   jcode         — parallel scaffolding swarm (installed via install.sh / cargo)
+#
+# Utilities:
+#   bot/telegram_bot.py — push-commit / bounded-run / ingest-media
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── Agent 1: hermes-agent (orchestration + Telegram gateway) ─────────────────
+# hermes-agent is NOT on PyPI — installed directly in the Dockerfile with a
+# graceful fallback chain (pip install hermes-agent[messaging] || hermes-agent
+# || skip). Do NOT list it here; a hard requirement causes `pip install -r`
+# to fail unconditionally when the package is absent from the index.
+
+# ── MCP (Model Context Protocol) client ──────────────────────────────────────
+mcp>=1.0.0
+
+# ── gRPC stack (openclaude gRPC client / server stubs) ───────────────────────
+grpcio>=1.62.0
+grpcio-tools>=1.62.0
+protobuf>=4.25.0
+
+# ── OpenAI-compatible client ──────────────────────────────────────────────────
+# gateway/run.py uses AsyncOpenAI to call DO Inference (OpenAI-compatible endpoint)
+openai>=1.0.0
+
+# ── HTTP clients ──────────────────────────────────────────────────────────────
+# requests: GitHub REST API push (Layer 2) in bot/telegram_bot.py
+requests>=2.31.0
+# aiohttp: async HTTP for agent tasks and bot operations
+aiohttp>=3.9.0
+# aiofiles: async file I/O
+aiofiles>=23.2.0
+
+# ── Telegram bot SDK ──────────────────────────────────────────────────────────
+# python-telegram-bot: Telegram Bot API wrapper (used as fallback / utilities)
+python-telegram-bot>=20.7
+
+# ── HuggingFace integration ───────────────────────────────────────────────────
+# huggingface_hub: HuggingFace push chain (Layer 1) in bot/telegram_bot.py
+huggingface_hub>=0.21.0
+
+# ── Media / document ingestion (ingest-media action) ─────────────────────────
+# PyMuPDF: PDF text extraction
+PyMuPDF>=1.23.0
+# pdfminer.six: fallback PDF text extraction
+pdfminer.six>=20221105
+# pillow: image metadata
+pillow>=10.0.0
+
+# ── Utilities ─────────────────────────────────────────────────────────────────
+setuptools>=69.0.0
+wheel>=0.43.0

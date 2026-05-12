@@ -1,0 +1,204 @@
+# =============================================================================
+# Rhodawk AI — Hermes General-Purpose Autonomous Agent
+# VPS Single-Click Deployment Dockerfile  v6.1
+#
+# Usage:
+#   docker build -f Dockerfile.vps -t rhodawk-hermes .
+#   docker run -d --name hermes --env-file .env -v hermes-data:/data \
+#     --restart unless-stopped rhodawk-hermes
+#
+# Or with docker compose:
+#   docker compose up -d
+#
+# Required env vars (copy .env.example → .env and fill in values):
+#   TELEGRAM_BOT_TOKEN   — from @BotFather on Telegram
+#   DO_INFERENCE_API_KEY — from https://cloud.digitalocean.com/gen-ai — all agents
+#   GITHUB_PAT           — GitHub PAT with repo + workflow scopes
+#
+# Optional:
+#   HF_TOKEN             — HuggingFace write token (only for HF repo push)
+#   BRAVE_API_KEY        — Brave Search API key (enables web search for Hermes)
+#
+# Persistent data:
+#   /data/               — mount a named volume here to survive restarts
+#                          Stores: hermes config, memories, cron, sessions, logs
+#
+# Changes from v6.0 → v6.1:
+#   FIX-A  Use requirements.txt instead of inline pip install for reproducibility
+#   FIX-B  Node.js explicitly pinned to 24.x — prevents ?? SyntaxError from
+#          falling back to Ubuntu's system Node.js 12.x
+#   FIX-C  chmod +x main.py added
+#   FIX-D  poppler-utils added (pdftotext fallback for ingest-media)
+# =============================================================================
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# ── System packages ────────────────────────────────────────────────────────────
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3-pip \
+    curl wget git supervisor \
+    build-essential ca-certificates \
+    libmupdf-dev poppler-utils \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── ripgrep 14.1.0 — required by openclaude for codebase search ───────────────
+RUN curl -LO https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep_14.1.0-1_amd64.deb \
+    && dpkg -i ripgrep_14.1.0-1_amd64.deb \
+    && rm ripgrep_14.1.0-1_amd64.deb
+
+# ── Node.js 24 ─────────────────────────────────────────────────────────────────
+# FIX-B: Explicitly install Node.js 24.x from NodeSource. Ubuntu 22.04's default
+# APT provides Node.js 12.x, which does NOT support the Nullish Coalescing (??)
+# operator used by @modelcontextprotocol/* MCP servers and @gitlawb/openclaude.
+# Node.js 14+ is the minimum; 24.x is recommended and tested.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && node --version \
+    && npm --version \
+    && echo "[node] $(node --version) installed — Nullish Coalescing (??) supported"
+
+# ── Bun runtime (required by @gitlawb/openclaude for gRPC TypeScript scripts) ─
+# openclaude's dev:grpc script calls `bun run scripts/start-grpc.ts`.
+# Without bun, openclaude-grpc crashes with "bun: not found" (exit 127).
+RUN npm install -g bun \
+    && bun --version && echo "[bun] installed OK"
+
+# ── Python 3.11 aliases ────────────────────────────────────────────────────────
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && pip3 install --upgrade pip setuptools wheel
+
+# ── Agent 1: HERMES-AGENT ────────────────────────────────────────────────────
+# hermes-agent is the full autonomous agent framework (terminal tool, skills,
+# memory, cron, multi-provider LLM routing). Install when available on PyPI.
+# If not available the built-in gateway/run.py (python-telegram-bot + openai)
+# is used automatically via main.py's three-tier fallback.
+RUN pip3 install --no-cache-dir "hermes-agent[messaging]>=0.10.0" \
+    || pip3 install --no-cache-dir "hermes-agent>=0.10.0" \
+    || echo "[hermes-agent] PyPI package not available — built-in gateway.run will be used"
+
+# ── Remaining Python dependencies from requirements.txt ───────────────────────
+# hermes-agent base already installed above; this adds:
+#   requests, aiohttp, aiofiles — HTTP clients
+#   python-telegram-bot         — Telegram SDK
+#   huggingface_hub             — HF push chain
+#   PyMuPDF, pdfminer.six, pillow — media ingestion
+#   grpcio, grpcio-tools, protobuf — openclaude gRPC client
+#   mcp                         — MCP client
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# ── Agent 2: OPENCLAUDE — cloned from GitHub source ───────────────────────────
+# openclaude provides a gRPC coding server at localhost:50051 (bidirectional
+# streaming, YOLO action-approval). Cloned from source because the npm package
+# does not include scripts/start-grpc.ts.
+# Fallback: if the repo is unavailable, supervisord starts the Python gRPC
+# server at skills/openclaude_grpc/server.py instead (same proto interface).
+RUN git clone --depth=1 https://github.com/Gitlawb/openclaude.git /opt/openclaude \
+    && cd /opt/openclaude \
+    && bun install \
+    && python3 -c "import re,sys; f='src/entrypoints/sdk/index.ts'; t=open(f).read(); p=re.sub(r'^detectStubLeaks\(\);?$','// detectStubLeaks() // patched: Bun v1.3 TDZ bug',t,flags=re.MULTILINE); (sys.exit('PATCH FAILED') if p==t else None); open(f,'w').write(p); print('Patched:',f)" \
+    && echo "[openclaude] source ready — $(ls scripts/start-grpc.ts) present" \
+    || echo "[openclaude] source unavailable — Python gRPC server fallback will be used"
+
+# ── Agent 3: OPENCLAW — openclaw/openclaw (non-critical) ──────────────────────
+RUN npm install -g openclaw@latest 2>/dev/null || echo "[openclaw] install skipped (non-critical)"
+
+# ── Tool: JCODE — Rhodawk wrapper script (DO Inference scaffolding agent) ─────
+# The upstream 1jehuang/jcode install script is unreliable and was confirmed
+# missing on container boot (Blink diagnostic 2025-04-10). We ship our own
+# shell wrapper that calls DO Inference directly. It is API-compatible with
+# the jcode CLI interface used by supervisord and hermes-agent skills.
+# COPY happens after "COPY . /app/" below — this RUN block just marks the slot.
+# The actual COPY + chmod is at the end of the App structure section.
+
+# ── MCP servers — shared across all 3 agents ──────────────────────────────────
+# Install each server individually with retry + graceful failure so a single
+# transient npm registry error does not abort the entire build.
+# filesystem + github are critical; fetch + brave-search are optional.
+RUN npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm config set fetch-retries 5
+RUN npm install -g @modelcontextprotocol/server-filesystem \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-filesystem) \
+    && echo "[mcp] server-filesystem OK"
+RUN npm install -g @modelcontextprotocol/server-github \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-github) \
+    && echo "[mcp] server-github OK"
+RUN npm install -g @modelcontextprotocol/server-fetch \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-fetch) \
+    || echo "[mcp] server-fetch install failed (non-critical — skipping)"
+RUN npm install -g @modelcontextprotocol/server-brave-search \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-brave-search) \
+    || echo "[mcp] server-brave-search install failed (non-critical — skipping)"
+
+# ── App structure ───────────────────────────────────────────────────────────────
+WORKDIR /app
+COPY . /app/
+
+# ── Install jcode wrapper (Rhodawk DO Inference scaffolding CLI) ───────────────
+# scripts/jcode is a shell wrapper shipped in-repo (replaces broken upstream
+# install script). Placed at /usr/local/bin/jcode so supervisord + hermes-agent
+# can call `jcode run --message "..."` without any PATH changes.
+RUN cp /app/scripts/jcode /usr/local/bin/jcode \
+    && chmod +x /usr/local/bin/jcode \
+    && jcode --version \
+    && echo "[jcode] wrapper installed at $(which jcode)"
+
+# ── Generate OpenClaude gRPC Python stubs from proto ──────────────────────────
+# Proto source: openclaude_grpc/openclaude.proto (top-level dir, shipped in-repo)
+# Stubs output: skills/openclaude_grpc/ so client.py + server.py can find them via
+#   sys.path.insert(0, "/app/skills/openclaude_grpc")
+RUN python3 -m grpc_tools.protoc \
+    -I/app/openclaude_grpc \
+    --python_out=/app/skills/openclaude_grpc \
+    --grpc_python_out=/app/skills/openclaude_grpc \
+    /app/openclaude_grpc/openclaude.proto \
+    && echo "[grpc] OpenClaude stubs generated in /app/skills/openclaude_grpc/ OK"
+
+# ── Git global config ───────────────────────────────────────────────────────────
+RUN git config --global user.email "hermes@rhodawk.ai" \
+    && git config --global user.name "Hermes Bot" \
+    && git config --global safe.directory "*"
+
+# ── Runtime directories ─────────────────────────────────────────────────────────
+# /data/ is mounted as a Docker named volume — persists across container restarts.
+# /tmp/repos is ephemeral scratch space for cloned repos.
+RUN mkdir -p /tmp/repos /var/log /root/.openclaw /root/.claude /root/.jcode
+
+# /data/ is declared as a volume so Docker manages its lifecycle.
+# Always mount with: -v hermes-data:/data
+VOLUME ["/data"]
+
+# ── Script permissions ──────────────────────────────────────────────────────────
+RUN chmod +x /app/scripts/init_and_start.sh \
+    && chmod +x /app/bot/telegram_bot.py \
+    && chmod +x /app/main.py
+
+# ── Force-reinstall python-telegram-bot LAST ──────────────────────────────────
+# hermes-agent or its transitive deps can install a bare `telegram` package from
+# PyPI that shadows python-telegram-bot's `telegram` namespace. When gateway/run.py
+# does `from telegram import Update`, Python resolves the wrong package and crashes
+# with ImportError, putting hermes-gateway into a FATAL crash-loop (bot goes deaf).
+# Running force-reinstall as the very last pip step guarantees the correct
+# python-telegram-bot owns the `telegram` namespace. The verify step makes any
+# namespace conflict visible at build time rather than silently at runtime.
+RUN pip3 install --no-cache-dir --force-reinstall "python-telegram-bot>=20.7" \
+    && python3 -c "from telegram.ext import Application; print('[ptb] python-telegram-bot namespace OK')"
+
+# ── supervisord config ──────────────────────────────────────────────────────────
+COPY supervisord.conf /etc/supervisor/conf.d/rhodawk.conf
+
+# ── Health check ────────────────────────────────────────────────────────────────
+# Validates the supervisord process is running and the hermes-gateway is alive.
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
+    CMD supervisorctl -c /etc/supervisor/conf.d/rhodawk.conf status hermes-gateway \
+        | grep -q "RUNNING" || exit 1
+
+EXPOSE 7860
+
+CMD ["/app/scripts/init_and_start.sh"]

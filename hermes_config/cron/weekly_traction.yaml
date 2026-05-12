@@ -1,0 +1,12 @@
+name: weekly-traction-report
+schedule: "0 9 * * 1"          # 9 AM every Monday
+platform: telegram
+description: >
+  Weekly Rhodawk traction report: PRs opened, tests fixed, repos processed.
+  Format as investor-ready metrics snapshot.
+task: |
+  COMPLETED=$(wc -l < /data/completed_repos.txt 2>/dev/null || echo 0)
+  echo "RHODAWK WEEKLY — $(date +%Y-%m-%d)"
+  echo "Repos processed: $COMPLETED"
+  echo "PRs opened this week: $(git -C /tmp/repos log --oneline --since='1 week ago' 2>/dev/null | wc -l)"
+  echo "Active target list: $(wc -l < /data/target_list.json 2>/dev/null || echo unknown) repos"
