@@ -749,10 +749,13 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     camofox_base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
     await update.message.reply_text(
         "Hermes — Rhodawk AI\n\n"
-        "/start   — Status\n"
-        "/reset   — Clear history\n"
-        "/status  — Stack health check\n"
-        "/help    — This message\n\n"
+        "/start          — Status + current UTC time\n"
+        "/reset          — Clear conversation history\n"
+        "/status         — Stack health check\n"
+        "/memory         — Read long-term memory\n"
+        "/memory <note>  — Append note to long-term memory\n"
+        "/memory clear   — Wipe memory\n"
+        "/help           — This message\n\n"
         f"Model: {MODEL}\n"
         f"Endpoint: {BASE_URL}\n"
         f"Camofox: {camofox_base}"
@@ -771,6 +774,80 @@ async def cmd_status(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         30,
     )
     await update.message.reply_text(result[:MAX_MSG_LENGTH])
+
+
+# ── /memory command ───────────────────────────────────────────────────────────
+_MEMORY_FILE_CANDIDATES = [
+    Path("/data/.hermes/memories/MEMORY.md"),
+    Path("/app/hermes_config/memories/MEMORY.md"),
+]
+
+
+def _memory_path() -> Path:
+    """Return writable MEMORY.md path, creating dirs if needed."""
+    primary = _MEMORY_FILE_CANDIDATES[0]
+    primary.parent.mkdir(parents=True, exist_ok=True)
+    return primary
+
+
+def _read_memory() -> str:
+    for p in _MEMORY_FILE_CANDIDATES:
+        if p.exists():
+            return p.read_text(encoding="utf-8")
+    return "(empty — no MEMORY.md found)"
+
+
+def _append_memory(note: str) -> str:
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = f"\n## {ts}\n{note.strip()}\n"
+    p = _memory_path()
+    if not p.exists():
+        p.write_text(f"# Hermes Long-Term Memory\n{entry}", encoding="utf-8")
+        return f"Memory file created and note saved."
+    with open(p, "a", encoding="utf-8") as f:
+        f.write(entry)
+    return f"Appended to MEMORY.md at {ts}."
+
+
+def _clear_memory() -> str:
+    p = _memory_path()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    p.write_text(f"# Hermes Long-Term Memory\n\n(Cleared {ts})\n", encoding="utf-8")
+    return f"MEMORY.md cleared at {ts}."
+
+
+async def cmd_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
+    """
+    /memory          — show current MEMORY.md (last 3500 chars)
+    /memory <note>   — append timestamped note to MEMORY.md
+    /memory clear    — wipe MEMORY.md (keeps header)
+    """
+    if not _is_allowed(update.effective_chat.id):
+        return
+
+    args_text = update.message.text.partition(" ")[2].strip()
+
+    await update.message.chat.send_action(ChatAction.TYPING)
+
+    try:
+        if not args_text:
+            content = _read_memory()
+            if len(content) > 3500:
+                header = f"(showing last 3500 of {len(content)} chars)\n\n"
+                content = header + content[-3500:]
+            await update.message.reply_text(content or "(empty)")
+
+        elif args_text.lower() == "clear":
+            result = _clear_memory()
+            await update.message.reply_text(result)
+
+        else:
+            result = _append_memory(args_text)
+            await update.message.reply_text(result)
+
+    except Exception as exc:
+        logger.error(f"[memory cmd] {exc}", exc_info=True)
+        await update.message.reply_text(f"Memory error: {exc}")
 
 
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
@@ -846,6 +923,7 @@ def main() -> None:
     app.add_handler(CommandHandler("reset",  cmd_reset))
     app.add_handler(CommandHandler("help",   cmd_help))
     app.add_handler(CommandHandler("status", cmd_status))
+    app.add_handler(CommandHandler("memory", cmd_memory))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
 
     app.run_polling(allowed_updates=Update.ALL_TYPES, drop_pending_updates=True)
