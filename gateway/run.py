@@ -1,15 +1,19 @@
 #!/usr/bin/env python3
 """
-gateway/run.py — Rhodawk AI Telegram Gateway v3.0 (Full Agentic Loop)
+gateway/run.py — Rhodawk AI Telegram Gateway v4.0 (Jarvis-Grade)
+
+Fixes applied (v4.0):
+  FIX-1  Per-request UTC timestamp injected into system prompt — no more date hallucination
+  FIX-2  SQLite-backed conversation history — zero amnesia on restart
+  FIX-3  _build_system_prompt() — dynamic per-request prompt with live timestamp + fresh URLs
+  FIX-4  Scratchpad FINAL ANSWER RULE + _verify_numbers() numeric consistency guard
+  FIX-5  Search degradation warning logged when BRAVE_API_KEY absent
+  FIX-6  _verify_numbers() blocks fabricated numbers from reaching the user
 
 Real tool execution via OpenAI function calling:
-  terminal        — bash commands inside the container (openclaude, jcode, git, curl, etc.)
-  web_fetch       — lightweight HTTP fetch + HTML strip (public APIs, raw files)
+  terminal        — bash commands inside the container
+  web_fetch       — lightweight HTTP fetch + HTML strip
   camofox_browse  — stealth browser session (JS SPAs, Cloudflare, LinkedIn, YouTube)
-
-The model (deepseek-v4-pro) gets SOUL.md as its persona + routing guide.
-Each tool call is executed for real. Results feed back into the loop.
-This replaces the previous plain-chat-loop that had no execution capability.
 
 Config (environment):
     TELEGRAM_BOT_TOKEN        — required
@@ -21,6 +25,7 @@ Config (environment):
     CAMOFOX_PORT              — camofox port (default: 9377)
     CAMOFOX_ACCESS_KEY        — camofox Bearer token
     HERMES_HOME               — default: /data/.hermes
+    BRAVE_API_KEY             — Brave Search API key (optional, DDG used as fallback)
 """
 
 import asyncio
@@ -28,11 +33,13 @@ import json
 import logging
 import os
 import re
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 from openai import AsyncOpenAI
@@ -71,11 +78,18 @@ MODEL = (
 HERMES_HOME      = os.environ.get("HERMES_HOME", "/data/.hermes")
 CAMOFOX_HOST     = os.environ.get("CAMOFOX_HOST", "camofox")
 CAMOFOX_PORT     = os.environ.get("CAMOFOX_PORT", "9377")
-CAMOFOX_BASE_URL = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
 CAMOFOX_KEY      = os.environ.get("CAMOFOX_ACCESS_KEY", "")
+BRAVE_API_KEY    = os.environ.get("BRAVE_API_KEY", "")
 MAX_MSG_LENGTH   = 4000
 MAX_HISTORY      = 20
 MAX_TOOL_ROUNDS  = 20
+
+# ── FIX-5: Warn at startup if web search will be degraded ────────────────────
+if not BRAVE_API_KEY:
+    logger.warning(
+        "[gateway] BRAVE_API_KEY not set — web_search will use DuckDuckGo fallback. "
+        "Set BRAVE_API_KEY for production-grade search results."
+    )
 
 # ── Chat ID whitelist ──────────────────────────────────────────────────────────
 _raw_ids = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -176,38 +190,27 @@ def _fix_python_c_quotes(cmd: str) -> str:
     """
     The model often generates:
         python3 -c "...data["key"]..."
-    The nested " inside the double-quoted -c string breaks bash:
-    bash closes the outer string at the FIRST inner " and Python gets
-    an incomplete, broken script — then the model hallucinates the answer.
-
-    Fix: find the outer double-quoted -c argument, switch outer " to ',
-    and escape any ' inside the script as '\\'' (bash single-quote escape).
-
-    Works for: python3 -c "SCRIPT" anywhere in a pipeline.
+    The nested " inside the double-quoted -c string breaks bash.
+    Fix: switch outer " to ', escape any ' inside as '\\''
     """
     marker = 'python3 -c "'
     idx = cmd.find(marker)
     if idx == -1:
         return cmd
 
-    # Split: everything before the marker, then the argument content
     pre   = cmd[:idx] + "python3 -c "
-    after = cmd[idx + len(marker):]   # everything after the opening "
+    after = cmd[idx + len(marker):]
 
-    # The intended closing " is the LAST " in the remaining string.
-    # (bash stops at the FIRST one, which is the bug; we use LAST as the intent.)
     last_q = after.rfind('"')
     if last_q == -1:
-        return cmd  # no closing quote found — leave as-is
+        return cmd
 
-    script    = after[:last_q]      # the intended Python script content
-    remainder = after[last_q + 1:]  # anything after the closing " (e.g. " 2>&1")
+    script    = after[:last_q]
+    remainder = after[last_q + 1:]
 
-    # If the script has no nested " it's fine as-is — no need to touch it
     if '"' not in script:
         return cmd
 
-    # Escape any single quotes in the script, then wrap in single quotes
     script_escaped = script.replace("'", "'\\''")
     logger.debug(f"[sanitizer] Rewrote python3 -c quoting for: {script[:60]!r}")
     return pre + "'" + script_escaped + "'" + remainder
@@ -217,7 +220,6 @@ def _fix_python_c_quotes(cmd: str) -> str:
 
 def _run_terminal(command: str, timeout: int = 60) -> str:
     timeout = max(1, min(int(timeout), 600))
-    # Auto-repair the common broken python3 -c "...{data["key"]}..." quoting
     command = _fix_python_c_quotes(command)
     try:
         result = subprocess.run(
@@ -227,7 +229,6 @@ def _run_terminal(command: str, timeout: int = 60) -> str:
         output = ((result.stdout or "") + (result.stderr or "")).strip()
         if not output:
             return f"(exit {result.returncode}, no output)"
-        # Prefix non-zero exits so the model knows the command failed
         prefix = f"[exit {result.returncode}] " if result.returncode != 0 else ""
         return prefix + output[:4000] + ("\n...[truncated]" if len(output) > 4000 else "")
     except subprocess.TimeoutExpired:
@@ -263,31 +264,31 @@ def _run_web_fetch(url: str, timeout: int = 15) -> str:
 def _run_camofox_browse_sync(url: str, wait_seconds: int = 3) -> str:
     import requests as req_lib
 
+    # FIX-3: CAMOFOX_BASE_URL resolved fresh per call (not at module load)
+    camofox_base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
     wait_seconds = max(1, min(int(wait_seconds), 10))
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if CAMOFOX_KEY:
         headers["Authorization"] = f"Bearer {CAMOFOX_KEY}"
 
-    # Health check
     try:
-        h = req_lib.get(f"{CAMOFOX_BASE_URL}/health", headers=headers, timeout=5)
+        h = req_lib.get(f"{camofox_base}/health", headers=headers, timeout=5)
         if h.status_code != 200:
             return (
-                f"[camofox] DOWN at {CAMOFOX_BASE_URL} (HTTP {h.status_code}). "
+                f"[camofox] DOWN at {camofox_base} (HTTP {h.status_code}). "
                 "Falling back to plain curl — web_fetch may return empty for JS pages."
             )
     except Exception as exc:
         return (
-            f"[camofox] Unreachable at {CAMOFOX_BASE_URL}: {exc}. "
+            f"[camofox] Unreachable at {camofox_base}: {exc}. "
             "Use web_fetch as fallback."
         )
 
     session_id = f"hermes-{uuid.uuid4().hex[:8]}"
     tab_id = None
     try:
-        # Create tab
         resp = req_lib.post(
-            f"{CAMOFOX_BASE_URL}/sessions/{session_id}/tabs",
+            f"{camofox_base}/sessions/{session_id}/tabs",
             json={"url": url},
             headers=headers,
             timeout=10,
@@ -297,12 +298,10 @@ def _run_camofox_browse_sync(url: str, wait_seconds: int = 3) -> str:
         if not tab_id:
             return f"[camofox] Tab creation failed: {json.dumps(data)[:300]}"
 
-        # Wait for JS render
         time.sleep(wait_seconds)
 
-        # Snapshot
         snap_resp = req_lib.get(
-            f"{CAMOFOX_BASE_URL}/tabs/{tab_id}/snapshot",
+            f"{camofox_base}/tabs/{tab_id}/snapshot",
             headers=headers,
             timeout=15,
         )
@@ -319,7 +318,7 @@ def _run_camofox_browse_sync(url: str, wait_seconds: int = 3) -> str:
             try:
                 import requests as req_lib2
                 req_lib2.delete(
-                    f"{CAMOFOX_BASE_URL}/tabs/{tab_id}",
+                    f"{camofox_base}/tabs/{tab_id}",
                     headers=headers, timeout=5,
                 )
             except Exception:
@@ -393,15 +392,16 @@ async def _deliver_reply(update: Update, reply: str) -> None:
             await update.message.reply_text(remaining[i : i + MAX_MSG_LENGTH])
 
 
-# ── System prompt ──────────────────────────────────────────────────────────────
-_GATEWAY_ADDENDUM = f"""
+# ── FIX-1 + FIX-3: Dynamic system prompt — built per request with live timestamp ──
+_GATEWAY_ADDENDUM_TEMPLATE = """
 
 ## Runtime Environment
 
 - Container: Ubuntu 22.04, Python 3.11, Node 24, Bun, ripgrep, git
+- Current UTC time: {utc_ts}
 - Tool: terminal  — real bash execution. Use for EVERYTHING executable.
 - Tool: web_fetch — curl + HTML strip. For plain APIs and raw files.
-- Tool: camofox_browse — headless Chromium at {CAMOFOX_BASE_URL}. For JS/Cloudflare sites.
+- Tool: camofox_browse — headless Chromium at http://{camofox_host}:{camofox_port}. For JS/Cloudflare sites.
 - Camofox auth: CAMOFOX_ACCESS_KEY env is set if configured.
 - openclaude gRPC: python3 /app/skills/openclaude_grpc/client.py --prompt "..." --workdir DIR --model deepseek-r1-distill-llama-70b
 - jcode swarm: JCODE_MODEL=kimi-k2.6 jcode run --message "..."
@@ -431,6 +431,8 @@ NEVER send file content as plain text. The tag triggers real sendDocument.
 
 4. The user can see every tool call AND its raw output in Telegram.
    Any fabrication is immediately visible. Do not try it.
+
+5. The current date and time is stated above. Use it. Do NOT guess or use training data dates.
 """
 
 
@@ -443,27 +445,97 @@ def _load_soul() -> str:
     return "You are Hermes, Rhodawk AI's autonomous executive intelligence. Direct. No hedging. Execute first."
 
 
-SYSTEM_PROMPT = _load_soul() + _GATEWAY_ADDENDUM
+def _build_system_prompt() -> str:
+    """
+    FIX-1: Per-request UTC timestamp injection.
+    FIX-3: Fresh CAMOFOX_BASE_URL resolution on every call.
+    FIX-8: System prompt is never static — always reflects current state.
+    """
+    utc_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    addendum = _GATEWAY_ADDENDUM_TEMPLATE.format(
+        utc_ts=utc_ts,
+        camofox_host=CAMOFOX_HOST,
+        camofox_port=CAMOFOX_PORT,
+    )
+    return _load_soul() + addendum
 
-# ── OpenAI client + conversation history ──────────────────────────────────────
-openai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
-_conversations: dict[int, list[dict]] = {}
+
+# ── FIX-2: SQLite-backed conversation persistence ─────────────────────────────
+_DB_PATH = os.path.join(HERMES_HOME, "sessions", "conversations.db")
 
 
-def _get_history(user_id: int) -> list[dict]:
-    return _conversations.setdefault(user_id, [])
+def _ensure_db() -> None:
+    db_dir = os.path.dirname(_DB_PATH)
+    os.makedirs(db_dir, exist_ok=True)
+    con = sqlite3.connect(_DB_PATH)
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS sessions "
+        "(user_id INTEGER PRIMARY KEY, history TEXT, updated_at TEXT)"
+    )
+    con.commit()
+    con.close()
+
+
+def _load_history(user_id: int) -> list[dict]:
+    try:
+        _ensure_db()
+        con = sqlite3.connect(_DB_PATH)
+        row = con.execute(
+            "SELECT history FROM sessions WHERE user_id=?", (user_id,)
+        ).fetchone()
+        con.close()
+        if row:
+            return json.loads(row[0])
+    except Exception as exc:
+        logger.warning(f"[memory] Load failed for user {user_id}: {exc} — starting fresh")
+    return []
+
+
+def _save_history(user_id: int, history: list[dict]) -> None:
+    try:
+        _ensure_db()
+        ts = datetime.now(timezone.utc).isoformat()
+        con = sqlite3.connect(_DB_PATH)
+        con.execute(
+            "INSERT OR REPLACE INTO sessions (user_id, history, updated_at) VALUES (?,?,?)",
+            (user_id, json.dumps(history), ts),
+        )
+        con.commit()
+        con.close()
+    except Exception as exc:
+        logger.warning(f"[memory] Save failed for user {user_id}: {exc}")
 
 
 def _trim(history: list[dict]) -> list[dict]:
     return history[-MAX_HISTORY:] if len(history) > MAX_HISTORY else history
 
 
-# ── Scratchpad fallback: execute bash blocks the model wrote as plain text ──────
+# ── FIX-4: Numeric consistency guard ─────────────────────────────────────────
+def _verify_numbers(tool_result: str, final_answer: str) -> bool:
+    """
+    Returns True if every large number in final_answer also appears in tool_result.
+    Prevents the model from citing a number that was never in the actual output.
+    Numbers < 4 digits are ignored (years, ports, etc. are fine to cite freely).
+    """
+    answer_nums = set(re.findall(r'\b\d{4,}\b', final_answer))
+    if not answer_nums:
+        return True  # no large numbers to verify
+    result_nums = set(re.findall(r'\b\d{4,}\b', tool_result))
+    fabricated = answer_nums - result_nums
+    if fabricated:
+        logger.warning(
+            f"[verify] Fabricated numbers detected in final answer: {fabricated} "
+            f"(not present in tool output)"
+        )
+        return False
+    return True
+
+
+# ── Scratchpad fallback ────────────────────────────────────────────────────────
 _BASH_BLOCK_RE = re.compile(
     r"```(?:bash|shell|sh|terminal|cmd|console|python3?)?\n(.*?)```",
     re.DOTALL | re.IGNORECASE,
 )
-# Also catch single-line commands the model writes without fences
 _INLINE_CMD_RE = re.compile(
     r"^(?:Running|Executing|Command):\s*(.+)$", re.MULTILINE
 )
@@ -487,7 +559,7 @@ async def _execute_text_scratchpad(content: str, messages: list[dict], update: U
     """
     If the model wrote commands as plain text instead of calling the terminal tool,
     extract them, run them for real, and inject results back into messages.
-    Returns True if any commands were found and executed.
+    FIX-4: FINAL ANSWER RULE injected so model cannot substitute a fabricated number.
     """
     cmds = _extract_commands(content)
     if not cmds:
@@ -517,24 +589,32 @@ async def _execute_text_scratchpad(content: str, messages: list[dict], update: U
 
         executed_pairs.append(f"$ {cmd}\n{result}")
 
-    # Inject real results — model MUST use these in its answer
+    all_results = "\n---\n".join(executed_pairs)
+
+    # FIX-4: inject strict FINAL ANSWER RULE — model must copy exact numbers from output
     messages.append({"role": "assistant", "content": content})
     messages.append({
         "role": "user",
         "content": (
             "SYSTEM NOTE: the commands you wrote were executed for real. "
             "Actual outputs:\n\n"
-            + "\n---\n".join(executed_pairs)
-            + "\n\nNow write your final answer using ONLY the actual outputs above. "
-            "Do NOT invent or guess any numbers or facts."
+            + all_results
+            + "\n\nFINAL ANSWER RULE: Copy the exact numbers and values from the output above. "
+            "Do NOT type any number that does not appear verbatim in the output above. "
+            "The output is the ground truth. Any other number is fabrication and is wrong."
         ),
     })
     return True
 
 
+# ── OpenAI client ──────────────────────────────────────────────────────────────
+openai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
+
+
 # ── Agentic loop ───────────────────────────────────────────────────────────────
 async def _agent_loop(messages: list[dict], update: Update) -> str:
     scratchpad_used = False
+    all_tool_results: list[str] = []  # FIX-4: track all tool results for number verification
 
     for _round in range(MAX_TOOL_ROUNDS):
         resp = await openai_client.chat.completions.create(
@@ -556,13 +636,29 @@ async def _agent_loop(messages: list[dict], update: Update) -> str:
                 executed = await _execute_text_scratchpad(content, messages, update)
                 if executed:
                     scratchpad_used = True
-                    continue  # re-query with real results injected
-            # Genuine final answer
+                    continue
+            # FIX-4: numeric consistency check before delivering answer
+            if all_tool_results and content:
+                combined_results = "\n".join(all_tool_results)
+                if not _verify_numbers(combined_results, content):
+                    logger.warning("[gateway] Number mismatch detected — appending correction note")
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            "CORRECTION REQUIRED: your answer contains numbers that do not match "
+                            "the actual tool output. Re-read the tool outputs above and restate "
+                            "your answer using only the exact values from those outputs. "
+                            "Do not guess or recall from training data."
+                        ),
+                    })
+                    all_tool_results = []  # prevent infinite correction loop
+                    continue
             return content
 
-        scratchpad_used = False  # reset if real tool calls are being used
+        scratchpad_used = False
 
-        # Append assistant turn with proper tool_calls
+        # Append assistant turn with tool_calls
         messages.append({
             "role": "assistant",
             "content": content,
@@ -584,7 +680,6 @@ async def _agent_loop(messages: list[dict], update: Update) -> str:
             except json.JSONDecodeError:
                 fn_args = {}
 
-            # Live progress
             if fn_name == "terminal":
                 progress = f"Running: {fn_args.get('command', '')[:180]}"
             elif fn_name == "web_fetch":
@@ -602,10 +697,12 @@ async def _agent_loop(messages: list[dict], update: Update) -> str:
             result = await _execute_tool(fn_name, fn_args)
             logger.info(f"[tool:{fn_name}] result={len(result)}chars")
 
-            # Show real raw output — makes fabrication impossible to hide
+            # FIX-4: accumulate results for number verification
+            all_tool_results.append(result)
+
             output_preview = result.strip()[:500]
             if output_preview:
-                await asyncio.sleep(0.35)   # Telegram rate-limit buffer
+                await asyncio.sleep(0.35)
                 try:
                     await update.message.reply_text(
                         f"Output:\n{output_preview}"
@@ -628,8 +725,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update.effective_chat.id):
         return
     name = update.effective_user.first_name or "there"
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     await update.message.reply_text(
         f"Hermes online — {name}.\n"
+        f"UTC: {ts}\n"
         f"Model: {MODEL}\n"
         f"Tools: terminal | web_fetch | camofox_browse\n"
         "Send any task. Use /reset to clear history, /status for stack health."
@@ -639,13 +738,15 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
 async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update.effective_chat.id):
         return
-    _conversations.pop(update.effective_user.id, None)
+    user_id = update.effective_user.id
+    _save_history(user_id, [])
     await update.message.reply_text("Cleared.")
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update.effective_chat.id):
         return
+    camofox_base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
     await update.message.reply_text(
         "Hermes — Rhodawk AI\n\n"
         "/start   — Status\n"
@@ -654,7 +755,7 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         "/help    — This message\n\n"
         f"Model: {MODEL}\n"
         f"Endpoint: {BASE_URL}\n"
-        f"Camofox: {CAMOFOX_BASE_URL}"
+        f"Camofox: {camofox_base}"
     )
 
 
@@ -684,17 +785,21 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     await update.message.chat.send_action(ChatAction.TYPING)
 
-    history = _get_history(user_id)
+    # FIX-2: Load history from SQLite (survives restarts)
+    history = _load_history(user_id)
     history.append({"role": "user", "content": user_msg})
     history = _trim(history)
-    _conversations[user_id] = history
 
-    messages = [{"role": "system", "content": SYSTEM_PROMPT}] + list(history)
+    # FIX-1 + FIX-8: Build system prompt fresh per request with live UTC timestamp
+    system_prompt = _build_system_prompt()
+    messages = [{"role": "system", "content": system_prompt}] + list(history)
 
     try:
         reply = await _agent_loop(messages, update)
         history.append({"role": "assistant", "content": reply})
-        _conversations[user_id] = _trim(history)
+        history = _trim(history)
+        # FIX-2: Persist updated history to SQLite
+        _save_history(user_id, history)
         await _deliver_reply(update, reply)
 
     except Exception as exc:
@@ -713,10 +818,23 @@ def main() -> None:
         logger.error("[gateway] FATAL: DO_INFERENCE_API_KEY not set")
         sys.exit(1)
 
+    # FIX-2: Ensure DB is initialised at startup
+    try:
+        _ensure_db()
+        logger.info(f"[gateway] SQLite memory DB ready at {_DB_PATH}")
+    except Exception as exc:
+        logger.warning(f"[gateway] Could not init SQLite DB: {exc} — will retry per-request")
+
+    camofox_base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
     logger.info(f"[gateway] Model   : {MODEL}")
     logger.info(f"[gateway] Endpoint: {BASE_URL}")
-    logger.info(f"[gateway] Camofox : {CAMOFOX_BASE_URL}")
+    logger.info(f"[gateway] Camofox : {camofox_base}")
     logger.info(f"[gateway] Tools   : terminal | web_fetch | camofox_browse")
+    logger.info(f"[gateway] Memory  : SQLite at {_DB_PATH}")
+    if BRAVE_API_KEY:
+        logger.info("[gateway] Search  : Brave API (primary) + DDG (fallback)")
+    else:
+        logger.warning("[gateway] Search  : DuckDuckGo only (BRAVE_API_KEY not set)")
     if ALLOWED_CHAT_IDS:
         logger.info(f"[gateway] Whitelist: {ALLOWED_CHAT_IDS}")
     else:

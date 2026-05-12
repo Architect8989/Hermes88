@@ -1,6 +1,6 @@
 # =============================================================================
 # Rhodawk AI — Hermes General-Purpose Autonomous Agent
-# VPS Single-Click Deployment Dockerfile  v6.1
+# VPS Single-Click Deployment Dockerfile  v7.0
 #
 # Usage:
 #   docker build -f Dockerfile.vps -t rhodawk-hermes .
@@ -23,7 +23,10 @@
 #   /data/               — mount a named volume here to survive restarts
 #                          Stores: hermes config, memories, cron, sessions, logs
 #
-# Changes from v6.0 → v6.1:
+# Changes from v6.1 → v7.0:
+#   FIX-5  duckduckgo-search installed for zero-API-key web search fallback
+#
+# Previous changes (v6.0 → v6.1):
 #   FIX-A  Use requirements.txt instead of inline pip install for reproducibility
 #   FIX-B  Node.js explicitly pinned to 24.x — prevents ?? SyntaxError from
 #          falling back to Ubuntu's system Node.js 12.x
@@ -89,8 +92,15 @@ RUN pip3 install --no-cache-dir "hermes-agent[messaging]>=0.10.0" \
 #   PyMuPDF, pdfminer.six, pillow — media ingestion
 #   grpcio, grpcio-tools, protobuf — openclaude gRPC client
 #   mcp                         — MCP client
+#   duckduckgo-search            — FIX-5: zero-key web search fallback
 COPY requirements.txt /tmp/requirements.txt
 RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# ── FIX-5: Ensure duckduckgo-search is always available (zero API key needed) ─
+# Belt-and-suspenders: also in requirements.txt, but explicit here so container
+# builds that skip requirements.txt (e.g. --no-install-recommends paths) still work.
+RUN pip3 install --no-cache-dir "duckduckgo-search>=6.0.0" \
+    && python3 -c "from duckduckgo_search import DDGS; print('[ddg] duckduckgo-search OK')"
 
 # ── Agent 2: OPENCLAUDE — cloned from GitHub source ───────────────────────────
 # openclaude provides a gRPC coding server at localhost:50051 (bidirectional

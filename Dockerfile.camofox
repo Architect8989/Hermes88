@@ -1,0 +1,54 @@
+# =============================================================================
+# Rhodawk AI — Camofox Stealth Browser  v2.0
+#
+# FIX-3: Build a proper image instead of live-cloning on every container start.
+# Previously: docker-compose used `node:20-slim` + inline bash to apt-get,
+#   git clone, npm install, npm start on EVERY restart. If the network was
+#   slow or npm install failed, camofox never came up.
+# Now: everything is baked into this image at build time. Container start
+#   is instant — just `npm start`.
+#
+# Build: docker build -f Dockerfile.camofox -t rhodawk-camofox .
+# Run:   docker run -d --name camofox -p 9377:9377 rhodawk-camofox
+# =============================================================================
+
+FROM node:20-slim
+
+RUN apt-get update -q && apt-get install -y -q git \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Clone at build time — not at runtime
+RUN git clone --depth 1 https://github.com/jo-inc/camofox-browser .
+
+# Install deps at build time
+RUN npm install
+
+# Chromium dependencies for headless operation
+RUN apt-get update -q && apt-get install -y -q \
+    chromium \
+    fonts-liberation \
+    libasound2 \
+    libatk-bridge2.0-0 \
+    libatk1.0-0 \
+    libcups2 \
+    libdbus-1-3 \
+    libgbm1 \
+    libgtk-3-0 \
+    libnss3 \
+    libx11-6 \
+    libxcomposite1 \
+    libxdamage1 \
+    libxext6 \
+    libxfixes3 \
+    libxrandr2 \
+    libxss1 \
+    libxtst6 \
+    xdg-utils \
+    && rm -rf /var/lib/apt/lists/*
+
+EXPOSE 9377
+
+# npm start — instant, no install step on runtime
+CMD ["npm", "start"]
