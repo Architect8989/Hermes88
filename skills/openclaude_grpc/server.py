@@ -14,7 +14,35 @@ Install openclaude:
 Env vars:
   GRPC_PORT         — listen port (default: 50051)
   OPENCLAUDE_MODEL  — model passed to openclaude --model
-  HERMES_YOLO_MODE  — "1" → pass --dangerously-skip-permissions to openclaude
+  HERMES_YOLO_MODE  — "1" → dangerously-skip-permissions (NO approval gate)
+                      default "0" → --permission-mode plan (read-only, safe)
+
+SAFETY MODEL — ActionRequired:
+  The proto defines ActionRequired for operator approval of dangerous commands
+  (CONFIRM_COMMAND, REQUEST_INFORMATION). This requires a full bidirectional
+  gRPC stream: server sends ActionRequired, client sends UserInput, server
+  resumes. That loop requires:
+    1. A real interactive channel (Telegram inline buttons, Slack block actions)
+       to surface the approval request to a human operator.
+    2. The gRPC client to hold the stream open and forward UserInput messages.
+    3. The subprocess stdin to be wired so that openclaude can receive the
+       approval answer and continue.
+
+  None of these are wired in the current implementation because this server
+  runs headlessly (no interactive channel available at the gRPC layer).
+
+  CURRENT SAFE DEFAULT (HERMES_YOLO_MODE != "1"):
+    --permission-mode plan is passed to openclaude.
+    openclaude will read files and produce a plan but will NOT execute shell
+    commands or write files. This eliminates the rm -rf class of risk.
+
+  TO ENABLE FULL EXECUTION:
+    Set HERMES_YOLO_MODE=1 only if:
+      a) You fully trust the LLM's judgment on the target repo, OR
+      b) You have implemented the ActionRequired bidirectional loop with
+         a real approval channel (Telegram, Slack, etc.)
+
+  Do NOT set HERMES_YOLO_MODE=1 in production against untrusted repos.
 """
 
 import logging
@@ -68,23 +96,45 @@ class AgentServiceServicer(openclaude_pb2_grpc.AgentServiceServicer):
         workdir = req.working_directory or "/tmp"
         yolo    = os.environ.get("HERMES_YOLO_MODE", "0") == "1"
 
-        # Pass 100% through to the real openclaude binary
+        # Build the command passed to the real openclaude binary.
+        # Safety policy is enforced here:
+        #   HERMES_YOLO_MODE=0 (default): --permission-mode plan
+        #     openclaude reads and plans but does NOT execute shell commands
+        #     or write files. Safe for untrusted / arbitrary repos.
+        #   HERMES_YOLO_MODE=1: --dangerously-skip-permissions
+        #     openclaude executes all tool calls without approval.
+        #     Use ONLY on trusted repos with human oversight.
         cmd = [binary, "--print", "--prompt", req.message, "--workdir", workdir]
         if model:
             cmd += ["--model", model]
+
         if yolo:
             cmd += ["--dangerously-skip-permissions"]
+            logger.warning(
+                "[server] HERMES_YOLO_MODE=1: dangerous commands will execute "
+                "without operator approval. Ensure you trust the target repo."
+            )
+        else:
+            # Safe default: read-only plan mode.
+            # openclaude will not execute shell commands or write files.
+            # To enable execution, set HERMES_YOLO_MODE=1 or implement the
+            # ActionRequired approval loop (see module docstring).
+            cmd += ["--permission-mode", "plan"]
+            logger.info(
+                "[server] permission-mode=plan (read-only). "
+                "Set HERMES_YOLO_MODE=1 to enable execution."
+            )
 
         logger.info(
             f"[server] openclaude session={req.session_id[:8] if req.session_id else '?'} "
-            f"workdir={workdir}"
+            f"workdir={workdir} yolo={yolo}"
         )
 
         try:
             proc = subprocess.Popen(
                 cmd,
                 stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,   # merge stderr into stdout stream
+                stderr=subprocess.STDOUT,
                 text=True,
                 bufsize=1,
             )

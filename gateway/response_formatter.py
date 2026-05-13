@@ -1,12 +1,15 @@
 #!/usr/bin/env python3
 """
-Response Formatter for Hermes88 Gateway.
-Applies channel-specific formatting to all gateway outputs using
-rhodawk_core.synthesis for template-based response synthesis.
+gateway/response_formatter.py — DEAD CODE — NOT CALLED BY ANY RUNNING PROCESS.
 
-This module ensures that Hermes responses are optimized for each
-delivery channel (Telegram, Discord, Slack, Email, etc.) with
-appropriate formatting, length limits, and density.
+gateway/run.py does os.execvpe(hermes | openclaw). This file is never imported.
+Response formatting in the running system is handled natively by the chosen
+gateway binary:
+  - hermes-agent: formats responses per-channel based on gateway.yaml
+  - openclaw: applies its own channel adapters (Telegram MarkdownV2, etc.)
+
+rhodawk_core.SynthesisEngine (which this file wraps) is also unreachable.
+See rhodawk_core/__init__.py for the full dead-code explanation.
 
 Rhodawk AI -- Peak Architecture v10.0
 """

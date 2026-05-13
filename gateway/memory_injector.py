@@ -1,11 +1,24 @@
 #!/usr/bin/env python3
 """
-Memory Context Injector for Hermes88 Gateway.
-Injects relevant semantic memories into every prompt before LLM processing.
-Uses rhodawk_core.memory.MemoryEngine for retrieval and context formatting.
+gateway/memory_injector.py — DEAD CODE — NOT CALLED BY ANY RUNNING PROCESS.
 
-This module is imported by gateway/run.py to enrich each operator message
-with relevant memory context before sending to the LLM.
+The claim "This module is imported by gateway/run.py" is FALSE.
+gateway/run.py does os.execvpe(hermes | openclaw). The Python process is
+replaced before any import of this file could occur. This module has zero
+callers in the current architecture.
+
+Memory injection in the running system is handled natively by whichever
+gateway you chose (hermes-agent or openclaw) using their own memory config:
+  - hermes-agent: config.yaml → memory.* section
+  - openclaw: SOUL.md + its own session memory
+
+rhodawk_core.MemoryEngine (which this file wraps) is also unreachable.
+See rhodawk_core/__init__.py for the full dead-code explanation.
+
+To make this useful: implement it as a standalone memory-writer process
+that reads from the Redis event bus and writes to the SQLite/Redis store,
+then configure hermes-agent to query that same store via its semantic
+memory backend.
 
 Rhodawk AI -- Peak Architecture v10.0
 """

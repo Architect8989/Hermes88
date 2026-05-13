@@ -1,12 +1,20 @@
 #!/usr/bin/env python3
 """
-Event Consumer for Hermes88 Gateway.
-Background coroutine that subscribes to the Redis event bus and routes
-events to the gateway for processing. Enables event-driven behavior
-without polling.
+gateway/event_consumer.py — DEAD CODE — NOT CALLED BY ANY RUNNING PROCESS.
 
-This module runs as a background task within the gateway process,
-listening for events from webhooks, system monitors, and scheduled tasks.
+The claim in earlier versions ("runs as a background task within the gateway
+process") is FALSE. gateway/run.py does os.execvpe(hermes | openclaw) which
+replaces the Python process. This file is never imported at runtime.
+
+If you want event-driven behavior, you have two options:
+  A) Use hermes-agent's built-in event bus (configured via gateway.yaml:
+     agent.event_bus_url). hermes-agent subscribes to Redis internally.
+  B) Run this file as a standalone process (separate supervisord program)
+     that consumes events and routes them to the hermes/openclaw gateway
+     via their HTTP/WebSocket control APIs.
+
+Option B requires writing the control-plane adapter — that code does not exist.
+Until it does, this module has no callers and no effect on the running system.
 
 Rhodawk AI -- Peak Architecture v10.0
 """

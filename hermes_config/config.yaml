@@ -128,7 +128,21 @@ display:
 # hermes-agent surfaces dangerous commands via its native approval mechanism
 # (Telegram inline buttons "Approve" / "Deny") before executing.
 # Set to true only if you have full trust in the LLM's judgment.
-yolo: true
+# SAFETY DEFAULT: yolo must be false.
+# yolo: true means openclaude executes ALL shell commands without operator
+# approval. For a system running against arbitrary/untrusted repos this is
+# a critical security failure — the LLM can run rm -rf, curl | bash, git push
+# --force, etc. with no human in the loop.
+#
+# Set to true ONLY if:
+#   a) The target repo is fully trusted and you accept the risk, OR
+#   b) You have implemented the ActionRequired bidirectional approval loop
+#      (proto ActionRequired → Telegram/Slack inline buttons → UserInput reply)
+#      so a human approves dangerous commands before they execute.
+#
+# With yolo: false, openclaude uses --permission-mode plan (read-only).
+# See skills/openclaude_grpc/server.py for the full safety model.
+yolo: false
 
 # -- Session management -----------------------------------------------------------
 session_reset:
