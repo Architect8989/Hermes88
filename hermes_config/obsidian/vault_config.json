@@ -1,0 +1,57 @@
+{
+  "vault_path": "/data/.hermes/obsidian-vault",
+  "sync_interval_seconds": 300,
+  "template_dir": "/data/.hermes/obsidian-vault/.templates",
+  "daily_notes_dir": "Daily Notes",
+  "daily_notes_format": "YYYY-MM-DD",
+  "tag_taxonomy": {
+    "projects": [
+      "hermes88",
+      "rhodawk",
+      "camofox",
+      "infrastructure",
+      "client-work"
+    ],
+    "research": [
+      "ai-models",
+      "architecture",
+      "market-analysis",
+      "technology",
+      "competitors"
+    ],
+    "decisions": [
+      "technical",
+      "business",
+      "strategic",
+      "operational",
+      "financial"
+    ],
+    "meetings": [
+      "standup",
+      "planning",
+      "review",
+      "one-on-one",
+      "external"
+    ],
+    "finances": [
+      "revenue",
+      "expenses",
+      "investments",
+      "forecasting",
+      "budgets"
+    ],
+    "intelligence": [
+      "osint",
+      "competitive",
+      "market",
+      "technical",
+      "threat"
+    ]
+  },
+  "backlinks_enabled": true,
+  "graph_export_enabled": true,
+  "auto_tag": true,
+  "max_note_length": 50000,
+  "archive_after_days": 90,
+  "archive_dir": "Archive"
+}

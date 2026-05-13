@@ -1,0 +1,49 @@
+# ─── Rhodawk AI - Hermes88 Webhook Server ────────────────────────────────────
+# Multi-stage build for the TypeScript webhook server.
+# Receives GitHub, Stripe, and system events, publishes to Redis.
+# ──────────────────────────────────────────────────────────────────────────────
+
+FROM node:20-slim AS builder
+
+WORKDIR /app
+
+# Install dependencies first (layer caching)
+COPY webhook/package.json webhook/package-lock.json* ./
+RUN npm ci --production=false
+
+# Copy source and build
+COPY webhook/tsconfig.json ./
+COPY webhook/src/ ./src/
+RUN npm run build
+
+# ─── Production Stage ─────────────────────────────────────────────────────────
+
+FROM node:20-slim AS production
+
+WORKDIR /app
+
+# Security: run as non-root user
+RUN groupadd -r hermes && useradd -r -g hermes hermes
+
+# Install production dependencies only
+COPY webhook/package.json webhook/package-lock.json* ./
+RUN npm ci --omit=dev && npm cache clean --force
+
+# Copy compiled output from builder
+COPY --from=builder /app/dist ./dist
+
+# Set ownership
+RUN chown -R hermes:hermes /app
+
+USER hermes
+
+# Configuration
+ENV NODE_ENV=production
+ENV WEBHOOK_PORT=9000
+
+EXPOSE 9000
+
+HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
+  CMD node -e "const http = require('http'); http.get('http://localhost:9000/health', (r) => { process.exit(r.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"
+
+CMD ["node", "dist/server.js"]
