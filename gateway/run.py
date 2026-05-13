@@ -1,25 +1,28 @@
 #!/usr/bin/env python3
 """
-gateway/run.py — Rhodawk AI Telegram Gateway v5.0 (Jarvis-Grade)
+gateway/run.py — Rhodawk AI Telegram Gateway v6.0 (Jarvis-Architecture)
 
-Root cause fixes (v5.0):
-  FIX-A  tool_choice="required" enforced for ALL data/action queries — model can no longer
-         skip tools and write fake search results, fake stats, or fabricated file content
-  FIX-B  Anti-fabrication interceptor — detects fake search-result patterns in model text
-         responses that had zero tool calls; forces a tool-required retry automatically
-  FIX-C  Persistent user profile — SQLite user_profiles table, never cleared by /reset
-         Captures Telegram name on first message, injected into every system prompt
-         so the model knows who it's talking to across all sessions
-  FIX-D  %%FILE:%% contract enforced in system prompt with concrete example — model
-         must send file content via the tag, never as inline prose
-  FIX-E  Bare git push intercepted in scratchpad — redirected to push-commit utility
-         which handles credentials; prevents "could not read Username" failures
-  FIX-F  /profile command — view and update your operator identity from Telegram
-  FIX-1  Per-request UTC timestamp injection (date hallucination eliminated)
-  FIX-2  SQLite conversation persistence (survives restarts)
-  FIX-3  Dynamic system prompt per request
-  FIX-4  Numeric consistency guard + scratchpad FINAL ANSWER RULE
-  FIX-5  DuckDuckGo search fallback (zero API key)
+The core Jarvis insight implemented here:
+  Jarvis never has to "go fetch" who Tony Stark is.
+  Context is INJECTED before every message, not discovered during it.
+
+Architecture (v6.0):
+  JARVIS-1  MEMORY.md auto-injected into every system prompt
+            (last 3000 chars of long-term memory is always in context)
+  JARVIS-2  User profile auto-injected (name, notes, first seen, last task)
+  JARVIS-3  Session-start briefing — first message of new session gets
+            a pre-loaded status block (git log, running services, last task)
+  JARVIS-4  Mandatory post-task memory write — after every successful
+            agent_loop the system AUTOMATICALLY appends a summary to MEMORY.md
+            The model doesn't have to "choose" to remember. It always does.
+  JARVIS-5  tool_choice="required" held for first 2 rounds on data queries
+            (not just first call) — closes the second-round fabrication escape
+  FIX-A    Anti-fabrication: data query classifier + tool_choice enforcement
+  FIX-B    Fabrication interceptor: detects fake search results in text responses
+  FIX-C    User profile persistence (user_profiles SQLite table, never reset)
+  FIX-D    %%FILE:%% file delivery with concrete example in prompt
+  FIX-E    Bare git push intercepted → push-commit utility
+  FIX-F    /profile command (view / set name / set notes)
 """
 
 import asyncio
@@ -56,22 +59,26 @@ logging.basicConfig(
 logger = logging.getLogger("gateway")
 
 # ── Config ────────────────────────────────────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_BOT_TOKEN", "")
-API_KEY          = os.environ.get("OPENAI_API_KEY") or os.environ.get("DO_INFERENCE_API_KEY", "")
-BASE_URL         = os.environ.get("OPENAI_BASE_URL") or os.environ.get("DO_INFERENCE_BASE_URL", "https://inference.do-ai.run/v1")
-MODEL            = os.environ.get("OPENAI_MODEL") or os.environ.get("HERMES_MODEL", "deepseek-v4-pro")
-HERMES_HOME      = os.environ.get("HERMES_HOME", "/data/.hermes")
-CAMOFOX_HOST     = os.environ.get("CAMOFOX_HOST", "camofox")
-CAMOFOX_PORT     = os.environ.get("CAMOFOX_PORT", "9377")
-CAMOFOX_KEY      = os.environ.get("CAMOFOX_ACCESS_KEY", "")
-BRAVE_API_KEY    = os.environ.get("BRAVE_API_KEY", "")
-GITHUB_PAT       = os.environ.get("GITHUB_PAT", "")
-MAX_MSG_LENGTH   = 4000
-MAX_HISTORY      = 20
-MAX_TOOL_ROUNDS  = 25
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
+API_KEY        = os.environ.get("OPENAI_API_KEY") or os.environ.get("DO_INFERENCE_API_KEY", "")
+BASE_URL       = (os.environ.get("OPENAI_BASE_URL")
+                  or os.environ.get("DO_INFERENCE_BASE_URL", "https://inference.do-ai.run/v1"))
+MODEL          = (os.environ.get("OPENAI_MODEL")
+                  or os.environ.get("HERMES_MODEL", "deepseek-v4-pro"))
+HERMES_HOME    = os.environ.get("HERMES_HOME", "/data/.hermes")
+CAMOFOX_HOST   = os.environ.get("CAMOFOX_HOST", "camofox")
+CAMOFOX_PORT   = os.environ.get("CAMOFOX_PORT", "9377")
+CAMOFOX_KEY    = os.environ.get("CAMOFOX_ACCESS_KEY", "")
+BRAVE_API_KEY  = os.environ.get("BRAVE_API_KEY", "")
+GITHUB_PAT     = os.environ.get("GITHUB_PAT", "")
+MAX_MSG_LENGTH  = 4000
+MAX_HISTORY     = 20
+MAX_TOOL_ROUNDS = 25
 
 if not BRAVE_API_KEY:
     logger.warning("[gateway] BRAVE_API_KEY not set — DuckDuckGo will be used for search")
+if not GITHUB_PAT:
+    logger.warning("[gateway] GITHUB_PAT not set — git push via push-commit will fail")
 
 # ── Chat ID whitelist ─────────────────────────────────────────────────────────
 _raw_ids = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -81,19 +88,13 @@ if _raw_ids:
         _p = _part.strip()
         if _p.lstrip("-").isdigit():
             ALLOWED_CHAT_IDS.add(int(_p))
-    logger.info(f"[gateway] Whitelist: {ALLOWED_CHAT_IDS}")
-else:
-    logger.warning("[gateway] TELEGRAM_CHAT_ID not set — open to all users")
-
 
 def _is_allowed(chat_id: int) -> bool:
     return True if not ALLOWED_CHAT_IDS else chat_id in ALLOWED_CHAT_IDS
 
 
 # ── FIX-A: Data query classifier ─────────────────────────────────────────────
-# Queries matching these patterns REQUIRE real tool execution.
-# tool_choice="required" is enforced on the first LLM call for these.
-_DATA_QUERY_PATTERNS = re.compile(
+_DATA_QUERY_RE = re.compile(
     r"\b("
     r"search|find|look up|look for|latest|recent|current|now|today|"
     r"how many|how much|count|number of|what is the|what are the|"
@@ -107,42 +108,36 @@ _DATA_QUERY_PATTERNS = re.compile(
     r")\b",
     re.IGNORECASE,
 )
-
+_PURE_CONVO_RE = re.compile(
+    r"^(hi|hello|hey|thanks|thank you|ok|okay|sure|got it|great|good|"
+    r"what does .{1,30} stand for|who are you|what is your name|"
+    r"explain .{1,60}|define .{1,60}|what is a .{1,40})[\s\?\.!]*$",
+    re.IGNORECASE,
+)
 
 def _is_data_query(text: str) -> bool:
-    """Returns True if this query needs real tool execution (not a pure conversation)."""
-    pure_convo = re.compile(
-        r"^(hi|hello|hey|thanks|thank you|ok|okay|sure|got it|great|good|"
-        r"what does .{1,30} stand for|who are you|what is your name|"
-        r"explain .{1,60}|define .{1,60}|what is a .{1,40})[\s\?\.!]*$",
-        re.IGNORECASE,
-    )
-    if pure_convo.match(text.strip()):
+    if _PURE_CONVO_RE.match(text.strip()):
         return False
-    return bool(_DATA_QUERY_PATTERNS.search(text))
+    return bool(_DATA_QUERY_RE.search(text))
 
 
 # ── FIX-B: Anti-fabrication detector ─────────────────────────────────────────
-_FAKE_SEARCH_PATTERNS = [
+_FAKE_PATTERNS = [
     re.compile(r"Title:\s+.+\nURL:\s+https?://", re.MULTILINE),
     re.compile(r"Running Brave Search for", re.IGNORECASE),
     re.compile(r"as of (January|February|March|April|May|June|July|August|September|October|November|December) 20\d\d", re.IGNORECASE),
-    re.compile(r"Description:\s+.{20,}", re.MULTILINE),
-    re.compile(r"Here'?s? (a|the) production.ready", re.IGNORECASE),
-    re.compile(r"Here'?s? (the )?(file|content|code|result|output)", re.IGNORECASE),
+    re.compile(r"^Description:\s+.{20,}", re.MULTILINE),
+    re.compile(r"Here'?s? (a |the )?production.ready", re.IGNORECASE),
+    re.compile(r"Here'?s? (the )?(file|content|code|result|output)\s*:", re.IGNORECASE),
+    re.compile(r"latest articles and resources", re.IGNORECASE),
 ]
 
-
-def _looks_fabricated(text: str, tool_calls_were_made: bool) -> bool:
-    """
-    Returns True if the model response looks like fabricated search results,
-    fabricated file content, or hallucinated output — AND no tool calls were made.
-    """
-    if tool_calls_were_made:
-        return False  # If tools ran, the content is real
-    for pat in _FAKE_SEARCH_PATTERNS:
+def _looks_fabricated(text: str, tool_calls_made: bool) -> bool:
+    if tool_calls_made:
+        return False
+    for pat in _FAKE_PATTERNS:
         if pat.search(text):
-            logger.warning(f"[anti-fab] Fabrication pattern detected: {pat.pattern[:60]}")
+            logger.warning(f"[anti-fab] Pattern hit: {pat.pattern[:60]}")
             return True
     return False
 
@@ -154,17 +149,16 @@ TOOLS = [
         "function": {
             "name": "terminal",
             "description": (
-                "Run a shell command inside the container. Returns real stdout + stderr. "
-                "Use for: web search (DDG/Brave), curl API calls, git operations via push-commit utility, "
-                "python3 scripts, delegating to openclaude, delegating to jcode, "
-                "file reads/writes, docker commands, any executable task. "
-                "MANDATORY: Call this tool first. NEVER write command output as text."
+                "Run ANY shell command inside the container. Returns real stdout + stderr. "
+                "Use for: web search, curl, git via push-commit utility, python3 scripts, "
+                "openclaude delegation, jcode swarm, file I/O, docker. "
+                "RULE: Call this first. Never write command output as text."
             ),
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Shell command (via /bin/bash -c)"},
-                    "timeout": {"type": "integer", "description": "Seconds (default 60, max 600)", "default": 60}
+                    "command": {"type": "string"},
+                    "timeout": {"type": "integer", "default": 60}
                 },
                 "required": ["command"]
             }
@@ -174,11 +168,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "web_fetch",
-            "description": (
-                "Fetch a URL via curl, return plain text (HTML stripped). "
-                "Use for: public JSON APIs, GitHub raw files, RSS, plain HTML pages. "
-                "For JS-rendered / Cloudflare sites use camofox_browse."
-            ),
+            "description": "Fetch URL via curl, return plain text (HTML stripped). Public APIs, raw GitHub files, RSS.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -193,10 +183,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "camofox_browse",
-            "description": (
-                "Open URL in camofox stealth browser (real headless Chromium). "
-                "Use for: JS SPAs, Cloudflare, LinkedIn, YouTube. Slower than web_fetch."
-            ),
+            "description": "Headless Chromium stealth browser. Use for JS SPAs, Cloudflare, LinkedIn, YouTube.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -210,7 +197,7 @@ TOOLS = [
 ]
 
 
-# ── Command sanitizer ─────────────────────────────────────────────────────────
+# ── Command sanitisers ────────────────────────────────────────────────────────
 def _fix_python_c_quotes(cmd: str) -> str:
     marker = 'python3 -c "'
     idx = cmd.find(marker)
@@ -225,27 +212,23 @@ def _fix_python_c_quotes(cmd: str) -> str:
     remainder = after[last_q + 1:]
     if '"' not in script:
         return cmd
-    script_escaped = script.replace("'", "'\\''")
-    return pre + "'" + script_escaped + "'" + remainder
+    return pre + "'" + script.replace("'", "'\\''") + "'" + remainder
 
 
-# FIX-E: Intercept bare git push — redirect to push-commit utility
 def _intercept_bare_git_push(cmd: str) -> str:
-    """
-    Bare `git push` fails silently (no credentials in container).
-    Redirect to push-commit utility which handles auth properly.
-    """
+    """FIX-E: Redirect bare git push → push-commit utility."""
     if re.search(r'\bgit\s+push\b', cmd) and 'push-commit' not in cmd and 'push_commit' not in cmd:
-        logger.warning(f"[intercept] Bare git push detected — redirecting to push-commit: {cmd[:80]}")
+        logger.warning(f"[intercept] Bare git push → redirecting: {cmd[:80]}")
         return (
-            "echo '[HERMES] Bare git push intercepted — use push-commit utility:' && "
-            "echo 'python3 /app/bot/telegram_bot.py push-commit --repo URL --token $GITHUB_PAT --workdir DIR --message MSG' && "
-            "echo 'Or set remote with credentials: git remote set-url origin https://$GITHUB_PAT@github.com/OWNER/REPO.git'"
+            "echo '[HERMES] Bare git push has no credentials. Use push-commit utility:' && "
+            "echo 'python3 /app/bot/telegram_bot.py push-commit "
+            "--repo https://github.com/OWNER/REPO "
+            "--token $GITHUB_PAT --workdir DIR --message MSG'"
         )
     return cmd
 
 
-# ── Real tool execution ───────────────────────────────────────────────────────
+# ── Tool executors ────────────────────────────────────────────────────────────
 def _run_terminal(command: str, timeout: int = 60) -> str:
     timeout = max(1, min(int(timeout), 600))
     command = _fix_python_c_quotes(command)
@@ -280,7 +263,7 @@ def _run_web_fetch(url: str, timeout: int = 15) -> str:
         if not content:
             return f"[web_fetch] Empty (exit {result.returncode}): {result.stderr.strip()[:200]}"
         content = re.sub(r"<script[^>]*>.*?</script>", " ", content, flags=re.DOTALL | re.IGNORECASE)
-        content = re.sub(r"<style[^>]*>.*?</style>", " ", content, flags=re.DOTALL | re.IGNORECASE)
+        content = re.sub(r"<style[^>]*>.*?</style>",  " ", content, flags=re.DOTALL | re.IGNORECASE)
         content = re.sub(r"<[^>]+>", " ", content)
         content = re.sub(r"\s+", " ", content).strip()
         return (content[:4000] + "\n...[truncated]") if len(content) > 4000 else (content or "(empty)")
@@ -291,29 +274,32 @@ def _run_web_fetch(url: str, timeout: int = 15) -> str:
 
 
 def _run_camofox_browse_sync(url: str, wait_seconds: int = 3) -> str:
-    import requests as req_lib
+    try:
+        import requests as rlib
+    except ImportError:
+        return "[camofox] requests not installed — use web_fetch"
     camofox_base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
     wait_seconds = max(1, min(int(wait_seconds), 10))
     headers: dict[str, str] = {"Content-Type": "application/json"}
     if CAMOFOX_KEY:
         headers["Authorization"] = f"Bearer {CAMOFOX_KEY}"
     try:
-        h = req_lib.get(f"{camofox_base}/health", headers=headers, timeout=5)
+        h = rlib.get(f"{camofox_base}/health", headers=headers, timeout=5)
         if h.status_code != 200:
-            return f"[camofox] DOWN at {camofox_base}. Use web_fetch as fallback."
+            return f"[camofox] DOWN at {camofox_base}. Use web_fetch."
     except Exception as exc:
         return f"[camofox] Unreachable: {exc}. Use web_fetch."
     session_id = f"hermes-{uuid.uuid4().hex[:8]}"
     tab_id = None
     try:
-        resp = req_lib.post(f"{camofox_base}/sessions/{session_id}/tabs", json={"url": url}, headers=headers, timeout=10)
+        resp = rlib.post(f"{camofox_base}/sessions/{session_id}/tabs",
+                         json={"url": url}, headers=headers, timeout=10)
         data = resp.json()
         tab_id = data.get("tabId") or data.get("id") or data.get("tab_id")
         if not tab_id:
             return f"[camofox] Tab creation failed: {json.dumps(data)[:300]}"
         time.sleep(wait_seconds)
-        snap_resp = req_lib.get(f"{camofox_base}/tabs/{tab_id}/snapshot", headers=headers, timeout=15)
-        snap = snap_resp.json()
+        snap = rlib.get(f"{camofox_base}/tabs/{tab_id}/snapshot", headers=headers, timeout=15).json()
         text = snap.get("text") or snap.get("content") or snap.get("body") or ""
         if not text:
             return f"[camofox] Empty snapshot for {url}"
@@ -323,8 +309,7 @@ def _run_camofox_browse_sync(url: str, wait_seconds: int = 3) -> str:
     finally:
         if tab_id:
             try:
-                import requests as r2
-                r2.delete(f"{camofox_base}/tabs/{tab_id}", headers=headers, timeout=5)
+                rlib.delete(f"{camofox_base}/tabs/{tab_id}", headers=headers, timeout=5)
             except Exception:
                 pass
 
@@ -342,11 +327,11 @@ async def _execute_tool(name: str, args: dict) -> str:
 # ── File delivery ─────────────────────────────────────────────────────────────
 _FILE_TAG_RE = re.compile(r"%%FILE:(?P<name>[^\n%]+?)%%\s*\n(?P<content>.*?)%%/FILE%%", re.DOTALL)
 
-
 async def _send_file_attachment(bot, chat_id: int, filename: str, content: str) -> None:
     safe = filename.strip().replace("/", "_").replace("\\", "_") or "file.txt"
     suffix = Path(safe).suffix or ".txt"
-    with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, prefix="hermes_", delete=False, encoding="utf-8") as tmp:
+    with tempfile.NamedTemporaryFile(mode="w", suffix=suffix, prefix="hermes_",
+                                     delete=False, encoding="utf-8") as tmp:
         tmp.write(content)
         tmp_path = tmp.name
     try:
@@ -357,7 +342,6 @@ async def _send_file_attachment(bot, chat_id: int, filename: str, content: str) 
             Path(tmp_path).unlink()
         except Exception:
             pass
-
 
 async def _deliver_reply(update: Update, reply: str) -> None:
     bot = update.get_bot()
@@ -372,142 +356,128 @@ async def _deliver_reply(update: Update, reply: str) -> None:
     remaining = remaining.strip()
     if remaining:
         for i in range(0, max(len(remaining), 1), MAX_MSG_LENGTH):
-            await update.message.reply_text(remaining[i : i + MAX_MSG_LENGTH])
+            await update.message.reply_text(remaining[i: i + MAX_MSG_LENGTH])
 
 
-# ── SQLite — DB path ──────────────────────────────────────────────────────────
+# ── SQLite ────────────────────────────────────────────────────────────────────
 _DB_PATH = os.path.join(HERMES_HOME, "sessions", "conversations.db")
 
-
 def _ensure_db() -> None:
-    db_dir = os.path.dirname(_DB_PATH)
-    os.makedirs(db_dir, exist_ok=True)
+    os.makedirs(os.path.dirname(_DB_PATH), exist_ok=True)
     con = sqlite3.connect(_DB_PATH)
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS sessions "
-        "(user_id INTEGER PRIMARY KEY, history TEXT, updated_at TEXT)"
-    )
-    # FIX-C: persistent user profiles — NEVER cleared by /reset
-    con.execute(
-        "CREATE TABLE IF NOT EXISTS user_profiles ("
-        "user_id INTEGER PRIMARY KEY, "
-        "display_name TEXT, "
-        "telegram_username TEXT, "
-        "telegram_first_name TEXT, "
-        "first_seen TEXT, "
-        "last_seen TEXT, "
-        "notes TEXT DEFAULT ''"
-        ")"
-    )
+    con.executescript("""
+        CREATE TABLE IF NOT EXISTS sessions (
+            user_id INTEGER PRIMARY KEY,
+            history TEXT,
+            updated_at TEXT
+        );
+        CREATE TABLE IF NOT EXISTS user_profiles (
+            user_id INTEGER PRIMARY KEY,
+            display_name TEXT,
+            telegram_username TEXT,
+            telegram_first_name TEXT,
+            first_seen TEXT,
+            last_seen TEXT,
+            last_task TEXT DEFAULT '',
+            notes TEXT DEFAULT ''
+        );
+    """)
     con.commit()
     con.close()
 
-
-# ── FIX-2: Conversation persistence ──────────────────────────────────────────
 def _load_history(user_id: int) -> list[dict]:
     try:
         _ensure_db()
         con = sqlite3.connect(_DB_PATH)
         row = con.execute("SELECT history FROM sessions WHERE user_id=?", (user_id,)).fetchone()
         con.close()
-        if row:
-            return json.loads(row[0])
+        return json.loads(row[0]) if row else []
     except Exception as exc:
         logger.warning(f"[memory] Load failed {user_id}: {exc}")
-    return []
-
+        return []
 
 def _save_history(user_id: int, history: list[dict]) -> None:
     try:
         _ensure_db()
-        ts = datetime.now(timezone.utc).isoformat()
         con = sqlite3.connect(_DB_PATH)
         con.execute(
             "INSERT OR REPLACE INTO sessions (user_id, history, updated_at) VALUES (?,?,?)",
-            (user_id, json.dumps(history), ts),
+            (user_id, json.dumps(history), datetime.now(timezone.utc).isoformat()),
         )
         con.commit()
         con.close()
     except Exception as exc:
         logger.warning(f"[memory] Save failed {user_id}: {exc}")
 
-
 def _trim(history: list[dict]) -> list[dict]:
     return history[-MAX_HISTORY:] if len(history) > MAX_HISTORY else history
 
 
-# ── FIX-C: User profile persistence ──────────────────────────────────────────
+# ── FIX-C: User profile ───────────────────────────────────────────────────────
 def _load_profile(user_id: int) -> dict:
     try:
         _ensure_db()
         con = sqlite3.connect(_DB_PATH)
         row = con.execute(
-            "SELECT display_name, telegram_username, telegram_first_name, first_seen, last_seen, notes "
+            "SELECT display_name, telegram_username, telegram_first_name, "
+            "first_seen, last_seen, last_task, notes "
             "FROM user_profiles WHERE user_id=?", (user_id,)
         ).fetchone()
         con.close()
         if row:
             return {
-                "display_name": row[0] or "",
-                "telegram_username": row[1] or "",
+                "display_name":        row[0] or "",
+                "telegram_username":   row[1] or "",
                 "telegram_first_name": row[2] or "",
-                "first_seen": row[3] or "",
-                "last_seen": row[4] or "",
-                "notes": row[5] or "",
+                "first_seen":          row[3] or "",
+                "last_seen":           row[4] or "",
+                "last_task":           row[5] or "",
+                "notes":               row[6] or "",
             }
     except Exception as exc:
         logger.warning(f"[profile] Load failed {user_id}: {exc}")
     return {}
-
 
 def _upsert_profile(user_id: int, **kwargs) -> None:
     try:
         _ensure_db()
         ts = datetime.now(timezone.utc).isoformat()
         con = sqlite3.connect(_DB_PATH)
-        existing = con.execute(
-            "SELECT display_name, telegram_username, telegram_first_name, first_seen, notes "
-            "FROM user_profiles WHERE user_id=?", (user_id,)
-        ).fetchone()
-        if existing:
+        exists = con.execute("SELECT 1 FROM user_profiles WHERE user_id=?", (user_id,)).fetchone()
+        if exists:
             con.execute(
                 "UPDATE user_profiles SET "
                 "display_name=COALESCE(?,display_name), "
                 "telegram_username=COALESCE(?,telegram_username), "
                 "telegram_first_name=COALESCE(?,telegram_first_name), "
-                "last_seen=?, notes=COALESCE(?,notes) "
+                "last_seen=?, "
+                "last_task=COALESCE(?,last_task), "
+                "notes=COALESCE(?,notes) "
                 "WHERE user_id=?",
-                (
-                    kwargs.get("display_name"),
-                    kwargs.get("telegram_username"),
-                    kwargs.get("telegram_first_name"),
-                    ts,
-                    kwargs.get("notes"),
-                    user_id,
-                ),
+                (kwargs.get("display_name"), kwargs.get("telegram_username"),
+                 kwargs.get("telegram_first_name"), ts,
+                 kwargs.get("last_task"), kwargs.get("notes"), user_id),
             )
         else:
             con.execute(
                 "INSERT INTO user_profiles "
-                "(user_id, display_name, telegram_username, telegram_first_name, first_seen, last_seen, notes) "
-                "VALUES (?,?,?,?,?,?,?)",
-                (
-                    user_id,
-                    kwargs.get("display_name", ""),
-                    kwargs.get("telegram_username", ""),
-                    kwargs.get("telegram_first_name", ""),
-                    ts, ts,
-                    kwargs.get("notes", ""),
-                ),
+                "(user_id, display_name, telegram_username, telegram_first_name, "
+                "first_seen, last_seen, last_task, notes) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (user_id,
+                 kwargs.get("display_name", ""),
+                 kwargs.get("telegram_username", ""),
+                 kwargs.get("telegram_first_name", ""),
+                 ts, ts,
+                 kwargs.get("last_task", ""),
+                 kwargs.get("notes", "")),
             )
         con.commit()
         con.close()
     except Exception as exc:
         logger.warning(f"[profile] Upsert failed {user_id}: {exc}")
 
-
 def _sync_profile_from_telegram(update: Update) -> None:
-    """Capture Telegram identity on first message and keep it updated."""
     user = update.effective_user
     if not user:
         return
@@ -519,136 +489,219 @@ def _sync_profile_from_telegram(update: Update) -> None:
     )
 
 
-# ── FIX-4: Numeric consistency guard ─────────────────────────────────────────
-def _verify_numbers(tool_results: list[str], final_answer: str) -> bool:
-    answer_nums = set(re.findall(r'\b\d{5,}\b', final_answer))
-    if not answer_nums:
-        return True
-    result_nums: set[str] = set()
-    for r in tool_results:
-        result_nums |= set(re.findall(r'\b\d{5,}\b', r))
-    fabricated = answer_nums - result_nums
-    if fabricated:
-        logger.warning(f"[verify] Fabricated numbers: {fabricated}")
-        return False
-    return True
+# ── JARVIS-1: Memory file auto-reader ────────────────────────────────────────
+_MEMORY_PATHS = [
+    Path(HERMES_HOME) / "memories" / "MEMORY.md",
+    Path("/app/hermes_config/memories/MEMORY.md"),
+]
+
+def _memory_file_path() -> Path:
+    p = _MEMORY_PATHS[0]
+    p.parent.mkdir(parents=True, exist_ok=True)
+    return p
+
+def _read_memory_for_context(max_chars: int = 3000) -> str:
+    """
+    JARVIS-1: Read MEMORY.md and return the most recent entries.
+    This is called on every request and injected into the system prompt.
+    The model does NOT need to go fetch memory — it's always already there.
+    """
+    for p in _MEMORY_PATHS:
+        if p.exists():
+            content = p.read_text(encoding="utf-8").strip()
+            if not content:
+                return ""
+            # Return the tail — most recent entries are at the bottom
+            if len(content) > max_chars:
+                return "(... earlier entries omitted ...)\n\n" + content[-max_chars:]
+            return content
+    return ""
+
+def _auto_write_memory(task_summary: str) -> None:
+    """
+    JARVIS-4: Automatically write a memory entry after every successful task.
+    Called by handle_message after agent_loop completes.
+    The model doesn't choose to remember — the system forces it.
+    """
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    entry = f"\n## {ts}\n{task_summary.strip()}\n"
+    p = _memory_file_path()
+    try:
+        if not p.exists():
+            p.write_text(f"# Hermes Long-Term Memory\n{entry}", encoding="utf-8")
+        else:
+            with open(p, "a", encoding="utf-8") as f:
+                f.write(entry)
+    except Exception as exc:
+        logger.warning(f"[memory] Auto-write failed: {exc}")
+
+def _extract_task_summary(user_msg: str, reply: str) -> str:
+    """Create a one-line memory entry from a completed task."""
+    # Trim both to fit
+    q = user_msg.strip()[:120]
+    a = reply.strip()[:200]
+    return f"Task: {q}\nResult: {a}"
 
 
-# ── System prompt ─────────────────────────────────────────────────────────────
-_GATEWAY_ADDENDUM = """
+# ── JARVIS-3: Session-start briefing ─────────────────────────────────────────
+def _is_fresh_session(history: list[dict]) -> bool:
+    """True if this is the first message of a session (empty history)."""
+    return len(history) == 0
 
-## Runtime Environment
+def _build_briefing_block() -> str:
+    """
+    JARVIS-3: Build a real-time status block for session start.
+    Injected once at the top of the first message of each session.
+    """
+    checks = [
+        ("git_log", "git -C /app log --oneline -5 2>/dev/null || echo '(no git)'"),
+        ("services", "supervisorctl status 2>/dev/null | head -10 || echo '(no supervisor)'"),
+        ("disk",     "df -h / 2>/dev/null | tail -1"),
+        ("memory_recent", "tail -20 /data/.hermes/memories/MEMORY.md 2>/dev/null || echo '(no memory file)'"),
+    ]
+    lines = ["[SESSION START BRIEFING]"]
+    for label, cmd in checks:
+        try:
+            result = subprocess.run(
+                cmd, shell=True, capture_output=True, text=True,
+                timeout=5, executable="/bin/bash"
+            )
+            out = ((result.stdout or "") + (result.stderr or "")).strip()
+            lines.append(f"{label}: {out[:300]}")
+        except Exception as exc:
+            lines.append(f"{label}: (error: {exc})")
+    return "\n".join(lines)
 
-- Current UTC time: {utc_ts}
-- Operator: {operator_name}
-- Telegram username: {telegram_username}
-- Container: Ubuntu 22.04 | Python 3.11 | Node 24 | Bun | ripgrep | git | jq
-- tool terminal  — real bash. Use for EVERYTHING that needs execution.
-- tool web_fetch — curl + HTML strip. Plain APIs, raw files.
-- tool camofox_browse — headless Chromium at http://{camofox_host}:{camofox_port}. JS sites.
-- openclaude gRPC: python3 /app/skills/openclaude_grpc/client.py --prompt "..." --workdir DIR --model deepseek-r1-distill-llama-70b
-- jcode swarm: JCODE_MODEL=kimi-k2.6 jcode run --message "..."
-- push utility: python3 /app/bot/telegram_bot.py push-commit --repo URL --token $GITHUB_PAT --workdir DIR --message "msg"
-- health check: python3 /app/bot/telegram_bot.py health-check
 
-## File Delivery — MANDATORY FORMAT
+# ── System prompt builder ─────────────────────────────────────────────────────
+_SOUL_PATHS = [Path(HERMES_HOME) / "SOUL.md", Path("/app/hermes_config/SOUL.md")]
 
-To deliver any file (code, config, report, script), use EXACTLY this format:
-%%FILE:filename.ext%%
-<file content here — complete, not truncated>
-%%/FILE%%
+def _load_soul() -> str:
+    for p in _SOUL_PATHS:
+        if p.exists():
+            return p.read_text()
+    return "You are Hermes, Rhodawk AI intelligence. Execute first, report after."
 
-Example:
-%%FILE:.env.example%%
-# App config
-PORT=8000
-DATABASE_URL=postgresql://user:pass@localhost/db
-SECRET_KEY=change-me-in-production
-%%/FILE%%
+_RUNTIME_BLOCK = """
 
-NEVER send file content as inline prose. ALWAYS use the %%FILE:%% tag.
-The tag triggers a real Telegram sendDocument so the user gets a proper download.
+═══════════════════════════════════════════════════════
+HERMES RUNTIME — INJECTED AUTOMATICALLY — DO NOT IGNORE
+═══════════════════════════════════════════════════════
 
-## Git Push — MANDATORY RULE
+UTC NOW:          {utc_ts}
+OPERATOR NAME:    {operator_name}
+TELEGRAM:         {telegram_username}
+FIRST SEEN:       {first_seen}
+OPERATOR NOTES:   {operator_notes}
+LAST TASK:        {last_task}
+MODEL:            {model}
+CAMOFOX:          http://{camofox_host}:{camofox_port}
+GITHUB PAT:       {github_pat_status}
+BRAVE SEARCH:     {brave_status}
 
-NEVER use bare `git push` — there are no git credentials in the shell environment.
-ALWAYS push via the push-commit utility:
+──── LONG-TERM MEMORY (auto-injected, always current) ────
+{memory_block}
+──── END MEMORY ────
 
-python3 /app/bot/telegram_bot.py push-commit \\
-  --repo https://github.com/OWNER/REPO \\
-  --token $GITHUB_PAT \\
-  --workdir /tmp/repos/myrepo \\
-  --message "feat: description"
+──── SESSION STATUS ────
+{briefing_block}
+──── END STATUS ────
 
-If pushing to HuggingFace: use --token $HF_TOKEN with the HF repo URL.
+══════════════════════════════════════════
+TOOLS AVAILABLE (call these, do not narrate):
+  terminal       — real bash. Use for EVERYTHING executable.
+  web_fetch      — curl + HTML strip. Public APIs, raw files.
+  camofox_browse — headless Chromium. JS sites, Cloudflare.
 
-## Web Search — MANDATORY TOOL CALL
-
-NEVER write search results from memory. ALWAYS call the terminal tool first:
-
-Option 0 (default — no API key needed):
-python3 -c '
+SEARCH (MUST call terminal — NEVER write results from memory):
+  python3 -c '
 from duckduckgo_search import DDGS
-results = DDGS().text("QUERY", max_results=5)
+results = DDGS().text("QUERY HERE", max_results=5)
 for r in results:
     print(r["title"]); print(r["href"]); print(r["body"][:300]); print()
 '
 
-Option 1 (if BRAVE_API_KEY is set):
-curl -s "https://api.search.brave.com/res/v1/web/search?q=QUERY&count=5" \\
-  -H "Accept: application/json" -H "X-Subscription-Token: $BRAVE_API_KEY" | jq -r '.web.results[] | "\\(.title)\\n\\(.url)\\n\\(.description)\\n"'
+  With BRAVE_API_KEY:
+  curl -s "https://api.search.brave.com/res/v1/web/search?q=QUERY&count=5" \\
+    -H "Accept: application/json" -H "X-Subscription-Token: $BRAVE_API_KEY" | \\
+    jq -r '.web.results[] | "\\(.title)\\n\\(.url)\\n\\(.description)\\n"'
 
-## ABSOLUTE RULES — VIOLATION = JARVIS FAILURE
+FILE DELIVERY (MUST use this format — NEVER send file content as prose):
+  %%FILE:filename.ext%%
+  complete file content here — not truncated
+  %%/FILE%%
 
-1. CALL TOOLS FIRST. Never write the answer before the tool runs.
-   Every search result, every stat, every file, every number = tool call required.
+GIT PUSH (MUST use push-commit — NEVER bare git push, no credentials in shell):
+  python3 /app/bot/telegram_bot.py push-commit \\
+    --repo https://github.com/Architect8989/Hermes88 \\
+    --token $GITHUB_PAT \\
+    --workdir /tmp/repos/REPONAME \\
+    --message "feat: description"
 
-2. ZERO FABRICATION. If you write "Title: X\\nURL: Y" without calling terminal first,
-   you are lying to the operator. This is a critical failure.
+SUB-AGENTS:
+  openclaude: python3 /app/skills/openclaude_grpc/client.py --prompt "..." --workdir DIR
+  jcode:      OPENAI_BASE_URL=$DO_INFERENCE_BASE_URL OPENAI_API_KEY=$DO_INFERENCE_API_KEY jcode run --message "..."
+  health:     python3 /app/bot/telegram_bot.py health-check
 
-3. FILE CONTENT = FILE TAG. Any file you generate goes in %%FILE:%% tags. Period.
-
-4. GIT PUSH = push-commit utility. Never bare git push.
-
-5. NUMBERS from tool output only. If the tool said 14634, you say 14634.
-   You do not say 14,000 or approximately 15k or ~145677.
-
-6. DATE = the timestamp at the top of this prompt. Not your training data.
-   If asked what day it is: read the timestamp above. Answer exactly.
-
-7. MEMORY WRITES. After any meaningful task completion, write a summary to
-   /data/.hermes/memories/MEMORY.md so the next session can skip re-discovery.
+ABSOLUTE RULES (breaking any = Jarvis failure):
+  1. TOOLS BEFORE TEXT. For any data/action query: call terminal first.
+  2. ZERO FABRICATION. Never write search results, stats, or file content without a tool call.
+  3. FILE TAG. Any file you produce goes in %%FILE:%% tags. Period.
+  4. PUSH-COMMIT. Never bare git push. Always push-commit utility.
+  5. NUMBERS from tool output only. Copy verbatim. No rounding, no approximation.
+  6. DATE = timestamp above. Not your training data.
+  7. ADDRESS OPERATOR BY NAME. You know who they are. Use it.
+══════════════════════════════════════════
 """
 
 
-def _load_soul() -> str:
-    for path in [Path(HERMES_HOME) / "SOUL.md", Path("/app/hermes_config/SOUL.md")]:
-        if path.exists():
-            return path.read_text()
-    return "You are Hermes, Rhodawk AI executive intelligence. Direct. Execute first."
-
-
-def _build_system_prompt(user_id: int | None = None) -> str:
-    """Build per-request system prompt with live timestamp + operator identity."""
+def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = False) -> str:
     utc_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
-    # Operator identity injection
-    operator_name = "Operator"
+    operator_name    = "Operator"
     telegram_username = "unknown"
+    first_seen       = "unknown"
+    operator_notes   = "(none)"
+    last_task        = "(none)"
+
     if user_id:
         profile = _load_profile(user_id)
         if profile:
-            operator_name = profile.get("display_name") or profile.get("telegram_first_name") or "Operator"
-            telegram_username = "@" + profile.get("telegram_username", "") if profile.get("telegram_username") else "unknown"
+            operator_name     = (profile.get("display_name")
+                                 or profile.get("telegram_first_name")
+                                 or "Operator")
+            tg_user           = profile.get("telegram_username", "")
+            telegram_username = f"@{tg_user}" if tg_user else "unknown"
+            first_seen        = profile.get("first_seen", "unknown")
+            operator_notes    = profile.get("notes") or "(none)"
+            last_task         = profile.get("last_task") or "(none — first session)"
 
-    addendum = _GATEWAY_ADDENDUM.format(
+    # JARVIS-1: Inject memory automatically
+    memory_block = _read_memory_for_context(3000) or "(empty — no entries yet)"
+
+    # JARVIS-3: Session briefing only on fresh sessions (no history)
+    if is_fresh_session:
+        briefing_block = _build_briefing_block()
+    else:
+        briefing_block = "(mid-session — full briefing already provided at session start)"
+
+    runtime = _RUNTIME_BLOCK.format(
         utc_ts=utc_ts,
         operator_name=operator_name,
         telegram_username=telegram_username,
+        first_seen=first_seen,
+        operator_notes=operator_notes,
+        last_task=last_task,
+        model=MODEL,
         camofox_host=CAMOFOX_HOST,
         camofox_port=CAMOFOX_PORT,
+        github_pat_status="SET (use $GITHUB_PAT)" if GITHUB_PAT else "NOT SET — pushes will fail",
+        brave_status="SET (use $BRAVE_API_KEY)" if BRAVE_API_KEY else "NOT SET — use DDG fallback",
+        memory_block=memory_block,
+        briefing_block=briefing_block,
     )
-    return _load_soul() + addendum
+
+    return _load_soul() + runtime
 
 
 # ── OpenAI client ─────────────────────────────────────────────────────────────
@@ -659,8 +712,7 @@ openai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 _BASH_BLOCK_RE = re.compile(r"```(?:bash|shell|sh|terminal|cmd|console|python3?)?\n(.*?)```", re.DOTALL | re.IGNORECASE)
 _INLINE_CMD_RE = re.compile(r"^(?:Running|Executing|Command):\s*(.+)$", re.MULTILINE)
 
-
-def _extract_commands(text: str) -> list[str]:
+def _extract_scratchpad_commands(text: str) -> list[str]:
     cmds: list[str] = []
     for m in _BASH_BLOCK_RE.finditer(text):
         block = m.group(1).strip()
@@ -673,12 +725,11 @@ def _extract_commands(text: str) -> list[str]:
                 cmds.append(cmd)
     return cmds[:5]
 
-
 async def _execute_text_scratchpad(content: str, messages: list[dict], update: Update) -> bool:
-    cmds = _extract_commands(content)
+    cmds = _extract_scratchpad_commands(content)
     if not cmds:
         return False
-    logger.warning(f"[scratchpad] {len(cmds)} command(s) extracted from model text")
+    logger.warning(f"[scratchpad] Executing {len(cmds)} command(s) from model text")
     executed_pairs: list[str] = []
     for cmd in cmds:
         try:
@@ -686,7 +737,6 @@ async def _execute_text_scratchpad(content: str, messages: list[dict], update: U
         except Exception:
             pass
         result = await asyncio.to_thread(_run_terminal, cmd, 60)
-        logger.info(f"[scratchpad] cmd={cmd[:80]!r} result={len(result)}chars")
         preview = result.strip()[:500]
         try:
             await update.message.reply_text(
@@ -702,26 +752,46 @@ async def _execute_text_scratchpad(content: str, messages: list[dict], update: U
         "content": (
             "SYSTEM NOTE: commands executed for real. Actual outputs:\n\n"
             + "\n---\n".join(executed_pairs)
-            + "\n\nFINAL ANSWER RULE: Use ONLY the exact values from the outputs above. "
-            "Copy numbers verbatim. Do not type any number that does not appear in the output."
+            + "\n\nFINAL ANSWER RULE: Use ONLY exact values from the outputs above. "
+            "Copy numbers verbatim. State the result from the output."
         ),
     })
     return True
 
 
-# ── Agentic loop ──────────────────────────────────────────────────────────────
-async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> str:
-    scratchpad_used = False
-    all_tool_results: list[str] = []
-    tool_calls_ever_made = False
+# ── Numeric consistency guard ─────────────────────────────────────────────────
+def _verify_numbers(tool_results: list[str], final_answer: str) -> bool:
+    answer_nums = set(re.findall(r'\b\d{5,}\b', final_answer))
+    if not answer_nums:
+        return True
+    result_nums: set[str] = set()
+    for r in tool_results:
+        result_nums |= set(re.findall(r'\b\d{5,}\b', r))
+    fabricated = answer_nums - result_nums
+    if fabricated:
+        logger.warning(f"[verify] Fabricated numbers not in tool output: {fabricated}")
+        return False
+    return True
 
-    # FIX-A: Force tools on data queries
-    first_call_tool_choice = "required" if _is_data_query(user_msg) else "auto"
-    if first_call_tool_choice == "required":
-        logger.info(f"[anti-fab] Data query detected — tool_choice=required for first call")
+
+# ── JARVIS-5: Agentic loop with enforced tool rounds ─────────────────────────
+async def _agent_loop(
+    messages: list[dict],
+    update: Update,
+    user_msg: str,
+) -> str:
+    scratchpad_used   = False
+    all_tool_results: list[str] = []
+    tool_calls_ever   = False
+    is_data_query     = _is_data_query(user_msg)
+    # JARVIS-5: keep tool_choice="required" for first 2 rounds on data queries
+    forced_rounds     = 2 if is_data_query else 0
+
+    if is_data_query:
+        logger.info(f"[anti-fab] Data query — tool_choice=required for first {forced_rounds} rounds")
 
     for _round in range(MAX_TOOL_ROUNDS):
-        tool_choice = first_call_tool_choice if _round == 0 else "auto"
+        tool_choice = "required" if _round < forced_rounds else "auto"
 
         resp = await openai_client.chat.completions.create(
             model=MODEL,
@@ -732,25 +802,25 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
             temperature=0.05,
         )
         choice = resp.choices[0]
-        msg = choice.message
+        msg    = choice.message
         content = msg.content or ""
 
-        # ── No tool calls ────────────────────────────────────────────────────
+        # ── No tool calls in this round ──────────────────────────────────────
         if not msg.tool_calls:
             # FIX-B: Anti-fabrication check
-            if _looks_fabricated(content, tool_calls_ever_made):
+            if _looks_fabricated(content, tool_calls_ever):
                 logger.warning("[anti-fab] Fabricated response detected — forcing tool retry")
                 messages.append({"role": "assistant", "content": content})
                 messages.append({
                     "role": "user",
                     "content": (
-                        "STOP. Your last response was fabricated — you wrote search results, "
-                        "file content, or statistics without calling any tool. "
-                        "This is a critical failure. You MUST call the terminal tool NOW to get real data. "
-                        "Do not write any more text until you have called terminal and seen the real output."
+                        "STOP. That response was fabricated — you wrote search results, "
+                        "statistics, or file content without calling any tool. "
+                        "This is a Jarvis failure. Call the terminal tool NOW with a real command. "
+                        "Do not write any more text until you have seen actual tool output."
                     ),
                 })
-                first_call_tool_choice = "required"
+                forced_rounds = _round + 2  # extend forced tool rounds
                 continue
 
             # Scratchpad fallback
@@ -760,14 +830,14 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
                     scratchpad_used = True
                     continue
 
-            # FIX-4: Numeric consistency check
+            # Numeric consistency
             if all_tool_results and content and not _verify_numbers(all_tool_results, content):
                 messages.append({"role": "assistant", "content": content})
                 messages.append({
                     "role": "user",
                     "content": (
-                        "CORRECTION: your answer contains numbers not in the tool output. "
-                        "Re-read the actual outputs above and restate with exact values only."
+                        "Your answer contains numbers not present in the tool output. "
+                        "Re-read the outputs and restate with exact verbatim values only."
                     ),
                 })
                 all_tool_results = []
@@ -777,8 +847,7 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
 
         # ── Tool calls made ──────────────────────────────────────────────────
         scratchpad_used = False
-        tool_calls_ever_made = True
-        first_call_tool_choice = "auto"  # only enforce on first call
+        tool_calls_ever = True
 
         messages.append({
             "role": "assistant",
@@ -801,11 +870,11 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
                 fn_args = {}
 
             if fn_name == "terminal":
-                progress = f"Running: {fn_args.get('command', '')[:180]}"
+                progress = f"Running: {fn_args.get('command', '')[:200]}"
             elif fn_name == "web_fetch":
-                progress = f"Fetching: {fn_args.get('url', '')[:180]}"
+                progress = f"Fetching: {fn_args.get('url', '')[:200]}"
             elif fn_name == "camofox_browse":
-                progress = f"Browsing (stealth): {fn_args.get('url', '')[:160]}"
+                progress = f"Browsing: {fn_args.get('url', '')[:180]}"
             else:
                 progress = f"Tool: {fn_name}"
 
@@ -815,12 +884,12 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
                 pass
 
             result = await _execute_tool(fn_name, fn_args)
-            logger.info(f"[tool:{fn_name}] {len(result)}chars")
+            logger.info(f"[tool:{fn_name}] {len(result)} chars")
             all_tool_results.append(result)
 
             preview = result.strip()[:500]
             if preview:
-                await asyncio.sleep(0.35)
+                await asyncio.sleep(0.3)
                 try:
                     await update.message.reply_text(
                         f"Output:\n{preview}" + ("\n...[truncated]" if len(result) > 500 else "")
@@ -838,39 +907,25 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
 
 
 # ── Memory command helpers ────────────────────────────────────────────────────
-_MEMORY_FILE_CANDIDATES = [
-    Path("/data/.hermes/memories/MEMORY.md"),
-    Path("/app/hermes_config/memories/MEMORY.md"),
-]
-
-
-def _memory_path() -> Path:
-    primary = _MEMORY_FILE_CANDIDATES[0]
-    primary.parent.mkdir(parents=True, exist_ok=True)
-    return primary
-
-
-def _read_memory() -> str:
-    for p in _MEMORY_FILE_CANDIDATES:
+def _read_memory_display() -> str:
+    for p in _MEMORY_PATHS:
         if p.exists():
             return p.read_text(encoding="utf-8")
     return "(empty — no MEMORY.md found)"
 
-
-def _append_memory(note: str) -> str:
+def _append_memory_manual(note: str) -> str:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     entry = f"\n## {ts}\n{note.strip()}\n"
-    p = _memory_path()
+    p = _memory_file_path()
     if not p.exists():
         p.write_text(f"# Hermes Long-Term Memory\n{entry}", encoding="utf-8")
         return f"Memory file created. Note saved at {ts}."
     with open(p, "a", encoding="utf-8") as f:
         f.write(entry)
-    return f"Appended to MEMORY.md at {ts}."
+    return f"Appended at {ts}."
 
-
-def _clear_memory() -> str:
-    p = _memory_path()
+def _clear_memory_file() -> str:
+    p = _memory_file_path()
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     p.write_text(f"# Hermes Long-Term Memory\n\n(Cleared {ts})\n", encoding="utf-8")
     return f"MEMORY.md cleared at {ts}."
@@ -882,12 +937,14 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         return
     _sync_profile_from_telegram(update)
     profile = _load_profile(update.effective_user.id)
-    name = profile.get("display_name") or profile.get("telegram_first_name") or update.effective_user.first_name or "Operator"
+    name = (profile.get("display_name") or profile.get("telegram_first_name")
+            or update.effective_user.first_name or "Operator")
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     await update.message.reply_text(
         f"Hermes online. Good to see you, {name}.\n"
         f"UTC: {ts}\n"
         f"Model: {MODEL}\n"
+        f"Memory: auto-injected every message\n"
         f"Tools: terminal | web_fetch | camofox_browse\n"
         "Commands: /reset /status /memory /profile /help"
     )
@@ -899,26 +956,29 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     user_id = update.effective_user.id
     _save_history(user_id, [])
     profile = _load_profile(user_id)
-    name = profile.get("display_name") or "Operator"
-    await update.message.reply_text(f"Conversation cleared, {name}. Your profile and long-term memory are intact.")
+    name = profile.get("display_name") or profile.get("telegram_first_name") or "Operator"
+    await update.message.reply_text(
+        f"Conversation cleared, {name}.\n"
+        "Your profile and long-term memory are intact — Hermes still knows who you are."
+    )
 
 
 async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update.effective_chat.id):
         return
     await update.message.reply_text(
-        "Hermes — Rhodawk AI\n\n"
-        "/start             — Status + UTC time\n"
-        "/reset             — Clear conversation (profile kept)\n"
-        "/status            — Stack health check\n"
-        "/memory            — Read long-term memory\n"
-        "/memory <note>     — Append note to memory\n"
-        "/memory clear      — Wipe memory\n"
-        "/profile           — View your operator profile\n"
-        "/profile name <x>  — Set your display name\n"
-        "/profile notes <x> — Add profile notes\n"
-        "/help              — This message\n\n"
-        f"Model: {MODEL} | Endpoint: {BASE_URL}"
+        "Hermes v6.0 — Rhodawk AI\n\n"
+        "/start              — Status\n"
+        "/reset              — Clear conversation (profile + memory kept)\n"
+        "/status             — Stack health check\n"
+        "/memory             — Read long-term memory\n"
+        "/memory <note>      — Append note to memory\n"
+        "/memory clear       — Wipe memory\n"
+        "/profile            — View your operator profile\n"
+        "/profile name <x>   — Set display name\n"
+        "/profile notes <x>  — Set context notes for Hermes\n"
+        "/help               — This message\n\n"
+        f"Model: {MODEL}\nEndpoint: {BASE_URL}"
     )
 
 
@@ -943,24 +1003,19 @@ async def cmd_memory(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.chat.send_action(ChatAction.TYPING)
     try:
         if not args_text:
-            content = _read_memory()
+            content = _read_memory_display()
             if len(content) > 3500:
                 content = f"(showing last 3500 of {len(content)} chars)\n\n" + content[-3500:]
             await update.message.reply_text(content or "(empty)")
         elif args_text.lower() == "clear":
-            await update.message.reply_text(_clear_memory())
+            await update.message.reply_text(_clear_memory_file())
         else:
-            await update.message.reply_text(_append_memory(args_text))
+            await update.message.reply_text(_append_memory_manual(args_text))
     except Exception as exc:
         await update.message.reply_text(f"Memory error: {exc}")
 
 
 async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
-    """
-    /profile              — view profile
-    /profile name <x>     — set display name
-    /profile notes <x>    — set profile notes (context for Hermes)
-    """
     if not _is_allowed(update.effective_chat.id):
         return
     user_id = update.effective_user.id
@@ -970,17 +1025,17 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not args_text:
         profile = _load_profile(user_id)
         if not profile:
-            await update.message.reply_text("No profile yet. Send any message and it will be created.")
+            await update.message.reply_text("No profile yet — send any message to create it.")
             return
-        lines = [
-            f"Display name: {profile.get('display_name') or '(not set)'}",
-            f"Telegram: @{profile.get('telegram_username') or '(none)'} ({profile.get('telegram_first_name', '')})",
-            f"First seen: {profile.get('first_seen', 'unknown')}",
-            f"Last seen: {profile.get('last_seen', 'unknown')}",
-            f"Notes: {profile.get('notes') or '(none)'}",
-        ]
-        await update.message.reply_text("\n".join(lines))
-
+        await update.message.reply_text(
+            f"Name: {profile.get('display_name') or '(not set)'}\n"
+            f"Telegram: @{profile.get('telegram_username') or 'none'} "
+            f"({profile.get('telegram_first_name', '')})\n"
+            f"First seen: {profile.get('first_seen', 'unknown')}\n"
+            f"Last seen: {profile.get('last_seen', 'unknown')}\n"
+            f"Last task: {profile.get('last_task') or '(none)'}\n"
+            f"Notes: {profile.get('notes') or '(none)'}"
+        )
     elif args_text.lower().startswith("name "):
         new_name = args_text[5:].strip()
         if new_name:
@@ -988,19 +1043,17 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             await update.message.reply_text(f"Display name set to: {new_name}")
         else:
             await update.message.reply_text("Usage: /profile name <your name>")
-
     elif args_text.lower().startswith("notes "):
         notes = args_text[6:].strip()
         if notes:
             _upsert_profile(user_id, notes=notes)
-            await update.message.reply_text(f"Profile notes updated.")
+            await update.message.reply_text("Profile notes updated.")
         else:
             await update.message.reply_text("Usage: /profile notes <context for Hermes>")
     else:
         await update.message.reply_text(
-            "Usage:\n"
-            "/profile — view\n"
-            "/profile name <x> — set name\n"
+            "/profile           — view\n"
+            "/profile name <x>  — set name\n"
             "/profile notes <x> — set context notes"
         )
 
@@ -1015,25 +1068,36 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     user_id  = update.effective_user.id
     user_msg = update.message.text.strip()
 
-    # FIX-C: sync Telegram identity on every message
+    # FIX-C + JARVIS-2: sync Telegram identity, update last_seen
     _sync_profile_from_telegram(update)
-    _upsert_profile(user_id)  # update last_seen
+    _upsert_profile(user_id)
 
     await update.message.chat.send_action(ChatAction.TYPING)
 
-    history = _load_history(user_id)
+    history       = _load_history(user_id)
+    fresh_session = _is_fresh_session(history)
+
     history.append({"role": "user", "content": user_msg})
     history = _trim(history)
 
-    # FIX-1 + FIX-3: per-request prompt with live timestamp + operator identity
-    system_prompt = _build_system_prompt(user_id)
+    # JARVIS-1+2+3: build system prompt with memory + profile + briefing injected
+    system_prompt = _build_system_prompt(user_id, is_fresh_session=fresh_session)
     messages = [{"role": "system", "content": system_prompt}] + list(history)
 
     try:
         reply = await _agent_loop(messages, update, user_msg)
         history.append({"role": "assistant", "content": reply})
         _save_history(user_id, _trim(history))
+
+        # JARVIS-4: Auto-write memory after every task (non-trivial messages only)
+        if len(user_msg) > 15 and len(reply) > 20:
+            summary = _extract_task_summary(user_msg, reply)
+            _auto_write_memory(summary)
+            # Update last_task in profile
+            _upsert_profile(user_id, last_task=user_msg.strip()[:200])
+
         await _deliver_reply(update, reply)
+
     except Exception as exc:
         logger.error(f"[gateway] Error user {user_id}: {exc}", exc_info=True)
         await update.message.reply_text(f"Error: {type(exc).__name__}: {str(exc)[:300]}")
@@ -1050,17 +1114,18 @@ def main() -> None:
 
     try:
         _ensure_db()
-        logger.info(f"[gateway] SQLite DB ready: {_DB_PATH}")
+        logger.info(f"[gateway] SQLite DB: {_DB_PATH}")
     except Exception as exc:
         logger.warning(f"[gateway] DB init failed: {exc}")
 
-    logger.info(f"[gateway] Model   : {MODEL}")
-    logger.info(f"[gateway] Endpoint: {BASE_URL}")
-    logger.info(f"[gateway] Camofox : {CAMOFOX_HOST}:{CAMOFOX_PORT}")
-    logger.info(f"[gateway] Search  : {'Brave (primary) + DDG (fallback)' if BRAVE_API_KEY else 'DuckDuckGo only'}")
-    logger.info(f"[gateway] Git push: {'GITHUB_PAT set' if GITHUB_PAT else 'GITHUB_PAT NOT SET — pushes will fail'}")
+    logger.info(f"[gateway] Model      : {MODEL}")
+    logger.info(f"[gateway] Memory     : auto-injected from {_MEMORY_PATHS[0]}")
+    logger.info(f"[gateway] Profile    : persistent user_profiles table")
+    logger.info(f"[gateway] Anti-fab   : tool_choice=required for first 2 rounds on data queries")
+    logger.info(f"[gateway] Search     : {'Brave + DDG fallback' if BRAVE_API_KEY else 'DuckDuckGo only'}")
+    logger.info(f"[gateway] Git push   : {'GITHUB_PAT set' if GITHUB_PAT else 'GITHUB_PAT NOT SET'}")
     if ALLOWED_CHAT_IDS:
-        logger.info(f"[gateway] Whitelist: {ALLOWED_CHAT_IDS}")
+        logger.info(f"[gateway] Whitelist  : {ALLOWED_CHAT_IDS}")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start",   cmd_start))
