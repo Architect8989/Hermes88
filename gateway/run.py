@@ -624,15 +624,25 @@ API LISTS — always call terminal:
   curl -s "$DO_INFERENCE_BASE_URL/models" \
     -H "Authorization: Bearer $DO_INFERENCE_API_KEY" | jq -r '.data[].id'
 
-FILE DELIVERY — use %%FILE:%% tags. NEVER say "I've attached" or "here it is:":
-  %%FILE:filename.ext%%
-  complete file content here
+FILE DELIVERY — THE ONLY WAY TO SEND A FILE IS WITH %%FILE%% TAGS IN YOUR REPLY:
+
+  When user asks to "create and send", "make and send", "write and deliver" a file:
+  Step 1: Write the file content DIRECTLY into your reply inside %%FILE%% tags.
+  Step 2: Do NOT echo it to disk first. Do NOT say "I've attached". Just output the tags.
+
+  CORRECT — this is what actually sends a file to the user:
+  %%FILE:check.sh%%
+  #!/bin/bash
+  echo hello world
   %%/FILE%%
-  Example:
-  %%FILE:.env.example%%
-  PORT=8000
-  DATABASE_URL=postgresql://user:pass@localhost/db
-  %%/FILE%%
+
+  WRONG — these NEVER deliver a file to the user:
+  - echo "echo hello world" > check.sh    (writes to container disk only, user gets nothing)
+  - "The file is attached"                (it is not attached, nothing was sent)
+  - "Here is the content:"               (inline text, not a file attachment)
+
+  THE GATEWAY INTERCEPTS %%FILE%% TAGS AND SENDS THEM AS REAL TELEGRAM DOCUMENTS.
+  If you don't use the tags, no file is ever sent. Period.
 
 GIT PUSH — use push-commit utility. NEVER bare git push (no credentials):
   python3 /app/bot/telegram_bot.py push-commit \
@@ -829,6 +839,36 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
 
         # ── No tool calls ────────────────────────────────────────────────────
         if not msg.tool_calls:
+            # FIX-D: File delivery interceptor — catch "attached" lies
+            _wants_file = any(x in user_msg.lower() for x in [
+                "send", "attach", "deliver", "file", "download", "give me", "create"
+            ])
+            _has_file_tag = "%%FILE:" in content
+            _fake_delivery = any(x in content.lower() for x in [
+                "is attached", "the script is included", "i've attached",
+                "file is attached", "i have attached", "here's the file",
+                "attached for your", "file has been", "file created",
+                "created the file", "the file check", "included as a file",
+            ])
+            if _wants_file and _fake_delivery and not _has_file_tag:
+                logger.warning("[FIX-D] Model claimed file attached without %%FILE%% tag — forcing correction")
+                messages.append({"role": "assistant", "content": content})
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        "[GATEWAY SYSTEM] ERROR: You said the file was attached but NO FILE WAS SENT. "
+                        "Writing to disk (echo > file.sh) does NOT send anything to the user. "
+                        "You MUST rewrite your response using %%FILE%% tags:\n\n"
+                        "%%FILE:filename.sh%%\n"
+                        "#!/bin/bash\n"
+                        "...file content here...\n"
+                        "%%/FILE%%\n\n"
+                        "Output ONLY the %%FILE%%...%%/FILE%% block. Nothing else."
+                    ),
+                })
+                forced_rounds = 0  # next response should be text with %%FILE%% tag
+                continue
+
             # FIX-A: Anti-fabrication check
             if _looks_fabricated(content, tool_calls_ever):
                 logger.warning("[anti-fab] Fabricated response — forcing tool retry")
@@ -911,21 +951,6 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
             logger.info(f"[tool:{fn_name}] {len(result)} chars")
             all_tool_results.append(result)
 
-            # FIX-H: Auto-inject DDG fallback if search failed
-            ddg_hint = ""
-            if fn_name == "terminal" and (
-                "error" in result.lower()[:100] or
-                "exit 1" in result[:20] or
-                "traceback" in result.lower()[:200]
-            ) and "search" in fn_args.get("command", "").lower():
-                ddg_hint = (
-                    "\n\n[SYSTEM] Search command failed. "
-                    "Retry immediately with DDG:\n"
-                    "python3 -c \"\nfrom duckduckgo_search import DDGS\n"
-                    "for r in DDGS().text('QUERY', max_results=5):\n"
-                    "    print(r['title']); print(r['href']); print(r['body'][:300]); print()\n\""
-                )
-
             preview = result.strip()[:500]
             if preview:
                 await asyncio.sleep(0.3)
@@ -939,8 +964,44 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": result + ddg_hint,
+                "content": result,
             })
+
+            # FIX-H: Aggressive DDG auto-retry when search/fetch fails
+            # Detect: Brave error, jq null, curl exit codes, empty results, HTTP errors
+            _cmd = fn_args.get("command", "")
+            _is_search_cmd = any(x in _cmd.lower() for x in [
+                "search", "brave", "ddg", "duckduck", "news", "query", "q="
+            ])
+            _result_failed = any(x in result.lower()[:300] for x in [
+                "cannot iterate over null", "exit 5", "exit 1", "exit 6", "exit 7",
+                "error (at", "parse error", "connection refused", "could not resolve",
+                "unauthorized", "forbidden", "rate limit", "no results", "empty",
+                "null\nnull", "jq: error",
+            ]) or (result.strip() == "" or result.strip() == "(exit 0, no output)")
+
+            if fn_name == "terminal" and _is_search_cmd and _result_failed:
+                # Extract the original query from the failed command
+                _query_match = re.search(
+                    r'(?:q=|query=|text\(["\'])([^"\'&\n]+)', _cmd, re.IGNORECASE
+                )
+                _query = _query_match.group(1).replace("+", " ") if _query_match else "the topic"
+                logger.warning(f"[FIX-H] Search failed — forcing DDG retry for: {_query[:60]}")
+                messages.append({
+                    "role": "user",
+                    "content": (
+                        f"[GATEWAY SYSTEM] The previous search command FAILED. "
+                        f"You MUST call terminal NOW with DDG to search for: {_query}\n\n"
+                        "USE THIS EXACT COMMAND (substitute the query):\n"
+                        "python3 -c '\n"
+                        "from duckduckgo_search import DDGS\n"
+                        f"for r in DDGS().text(\"{_query}\", max_results=5):\n"
+                        "    print(r[\"title\"]); print(r[\"href\"]); print(r[\"body\"][:300]); print()\n"
+                        "'\n\n"
+                        "Do NOT respond until you have real DDG results."
+                    ),
+                })
+                forced_rounds = _round + 3  # force tool calls for next 3 rounds
 
     return "[hermes] Max tool rounds reached."
 
