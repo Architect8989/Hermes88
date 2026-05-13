@@ -153,25 +153,88 @@ Fallback chain: deepseek-v4-pro -> deepseek-r1-distill-llama-70b -> kimi-k2.6
 Trigger: HTTP 429 (rate limit) or 503 (service unavailable)
 Backoff: exponential with jitter (1s, 2s, 4s, 8s, 16s max)
 
-## Web Search -- MANDATORY TOOL (NEVER FABRICATE)
+## Web Search -- 4-TIER CASCADE (Layer G) NEVER FABRICATE, NEVER DECLARE UNAVAILABLE
 
-Default (no API key needed):
+Tier 1 — DDG (always works, no key):
 python3 -c '
 from duckduckgo_search import DDGS
-results = DDGS().text("QUERY", max_results=5)
-for r in results:
+for r in DDGS().text("QUERY", max_results=5):
     print(r["title"]); print(r["href"]); print(r["body"][:300]); print()
 '
 
-With BRAVE_API_KEY:
+Tier 2 — Brave (higher quality, BRAVE_API_KEY):
 curl -s "https://api.search.brave.com/res/v1/web/search?q=QUERY&count=5" \
   -H "Accept: application/json" \
   -H "X-Subscription-Token: $BRAVE_API_KEY" | \
   jq -r '.web.results[] | "\(.title)\n\(.url)\n\(.description)\n"'
 
-If DDG import fails: pip install duckduckgo-search -q && retry.
-If DDG network error: use web_fetch tool with a search engine URL.
-NEVER report "search unavailable" without trying both options.
+Tier 3 — Exa AI (semantic, EXA_API_KEY):
+curl -s "https://api.exa.ai/search" \
+  -H "x-api-key: $EXA_API_KEY" -H "Content-Type: application/json" \
+  -d '{"query":"QUERY","numResults":5,"useAutoprompt":true}' | jq '.results[]'
+
+Tier 4 — camofox Google (cannot be blocked):
+Use camofox_browse tool with url="@google_search?q=QUERY"
+
+BROWSER SEARCH MACROS (use as the url argument to camofox_browse):
+  @google_search?q=QUERY       -- Google via stealth Chromium
+  @bing_search?q=QUERY         -- Bing
+  @duckduckgo_search?q=QUERY   -- DuckDuckGo browser
+  @linkedin_search?q=QUERY     -- LinkedIn people/company
+
+Rule: try tier 1 first. If it fails, try tier 2, then 3, then 4.
+NEVER declare search unavailable — tier 4 (camofox + Google) ALWAYS works.
+
+## Camofox Browser Toolkit (Layer A -- Complete Integration)
+
+camofox_browse URL     -- headless Chromium. Navigate, read snapshots.
+camofox_act            -- click, type, scroll, press, navigate in open tab.
+camofox_extract        -- extract structured JSON from page using a schema.
+camofox_screenshot     -- screenshot URL → local PNG (visual verification).
+camofox_auth           -- inject auth cookies into session (bypass login walls).
+camofox_youtube        -- full transcript of any YouTube video.
+
+When to use each:
+- Static page read: camofox_browse
+- Login required: camofox_auth → camofox_browse
+- Fill form / click button: camofox_browse → camofox_act
+- Extract table / prices / contacts: camofox_extract with schema
+- Visual verification: camofox_screenshot
+- YouTube summary: camofox_youtube
+
+## Image Generation (Layer H -- FAL.ai)
+
+generate_image tool. Requires FAL_API_KEY secret.
+Default model: fal-ai/flux/schnell (fastest, free tier, 4 steps)
+Quality model: fal-ai/flux/dev (20 steps, slower)
+Google model: fal-ai/imagen4/preview
+
+The gateway intercepts [IMAGE_GENERATED] in the reply and sends the image
+as a Telegram photo automatically.
+
+## Skill Learning Loop (Layer E -- find_skill FIRST)
+
+Before ANY complex multi-step task: call find_skill with the task description.
+The skill engine accumulates proven procedures from your completed tasks.
+If a matching skill is found, follow the proven procedure exactly.
+After complex tasks: the engine automatically evaluates and saves new skills.
+
+Skill index location: /data/.hermes/skills/_learned/
+Skill index file: /data/.hermes/skills/INDEX.json
+
+## jcode Persistent Sessions (Layer B)
+
+WRONG (breaks memory):  jcode run --message "TASK"
+CORRECT (accumulates):  jcode run --message "TASK" --session SESSION_KEY
+
+Use session_manager.py for project-scoped sessions:
+python3 /app/skills/jcode_swarm/session_manager.py \
+  --project "Architect8989/Hermes88" \
+  --task "TASK DESCRIPTION" \
+  --workdir /tmp/repos/Hermes88
+
+Sessions persist across tasks. jcode's semantic memory (10MB/session)
+accumulates knowledge about each project's architecture and patterns.
 
 ## File Delivery -- MANDATORY FORMAT
 

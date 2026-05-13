@@ -71,15 +71,43 @@ CAMOFOX_HOST   = os.environ.get("CAMOFOX_HOST", "camofox")
 CAMOFOX_PORT   = os.environ.get("CAMOFOX_PORT", "9377")
 CAMOFOX_KEY    = os.environ.get("CAMOFOX_ACCESS_KEY", "")
 BRAVE_API_KEY  = os.environ.get("BRAVE_API_KEY", "")
+EXA_API_KEY    = os.environ.get("EXA_API_KEY", "")
+FAL_API_KEY    = os.environ.get("FAL_API_KEY", "")
 GITHUB_PAT     = os.environ.get("GITHUB_PAT", "")
 MAX_MSG_LENGTH  = 4000
 MAX_HISTORY     = 20
 MAX_TOOL_ROUNDS = 25
 
 if not BRAVE_API_KEY:
-    logger.warning("[gateway] BRAVE_API_KEY not set — DuckDuckGo fallback active")
+    logger.warning("[gateway] BRAVE_API_KEY not set — DuckDuckGo+Exa+camofox fallback active")
 if not GITHUB_PAT:
     logger.warning("[gateway] GITHUB_PAT not set — git push via push-commit will fail")
+if not FAL_API_KEY:
+    logger.warning("[gateway] FAL_API_KEY not set — image generation disabled")
+
+# ── Rhodawk Core module imports ───────────────────────────────────────────────
+import sys as _sys
+_sys.path.insert(0, "/app")
+try:
+    from rhodawk_core.skill_engine import get_skill_engine, TaskExecution
+    _skill_engine_available = True
+except ImportError:
+    _skill_engine_available = False
+    logger.warning("[gateway] rhodawk_core.skill_engine not available — skill learning disabled")
+
+try:
+    from rhodawk_core.operator_model import get_operator_model
+    _operator_model_available = True
+except ImportError:
+    _operator_model_available = False
+    logger.warning("[gateway] rhodawk_core.operator_model not available")
+
+try:
+    from rhodawk_core.image_gen import generate_image as _fal_generate, format_result as _fal_format_result
+    _image_gen_available = True
+except ImportError:
+    _image_gen_available = False
+    logger.warning("[gateway] rhodawk_core.image_gen not available — FAL.ai disabled")
 
 # ── Chat ID whitelist ─────────────────────────────────────────────────────────
 _raw_ids = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
@@ -185,7 +213,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "camofox_browse",
-            "description": "Headless Chromium stealth browser. JS SPAs, Cloudflare, LinkedIn, YouTube.",
+            "description": "Headless Chromium stealth browser. JS SPAs, Cloudflare, LinkedIn, YouTube. For interactive pages use camofox_act instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -193,6 +221,161 @@ TOOLS = [
                     "wait_seconds": {"type": "integer", "default": 3}
                 },
                 "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "camofox_act",
+            "description": (
+                "Interact with a page already open in camofox: click, type, scroll, press keys. "
+                "Use after camofox_browse to fill forms, click buttons, navigate SPAs. "
+                "tab_id required — returned by camofox_browse_tab (use terminal + camofox API if needed)."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "tab_id": {"type": "string", "description": "Active tab ID from a prior camofox session"},
+                    "action": {"type": "string", "enum": ["click", "type", "scroll", "press", "navigate", "back", "forward", "refresh"]},
+                    "selector": {"type": "string", "description": "CSS selector or element ref for click/type"},
+                    "text": {"type": "string", "description": "Text to type (for action=type)"},
+                    "key": {"type": "string", "description": "Key name for action=press (e.g. Enter, Tab, Escape)"},
+                    "direction": {"type": "string", "enum": ["up", "down", "left", "right"], "description": "Scroll direction"},
+                    "amount": {"type": "integer", "default": 500, "description": "Scroll amount in pixels"},
+                    "url": {"type": "string", "description": "URL for action=navigate"},
+                    "user_id": {"type": "string", "default": "hermes"}
+                },
+                "required": ["tab_id", "action"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "camofox_extract",
+            "description": (
+                "Extract structured data from a page using a JSON schema. "
+                "Use for price scraping, table extraction, contact lists, job postings. "
+                "Returns JSON matching your schema. More reliable than regex on HTML."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string", "description": "URL to browse and extract from"},
+                    "schema": {
+                        "type": "object",
+                        "description": "JSON schema describing the structure to extract. Example: {\"price\": \"string\", \"title\": \"string\"}",
+                    },
+                    "wait_seconds": {"type": "integer", "default": 3},
+                    "user_id": {"type": "string", "default": "hermes"}
+                },
+                "required": ["url", "schema"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "camofox_screenshot",
+            "description": (
+                "Take a screenshot of a live webpage for visual verification. "
+                "Returns local path to PNG file. Use to verify UI changes, dashboards, paywalled content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "url": {"type": "string"},
+                    "wait_seconds": {"type": "integer", "default": 2},
+                    "user_id": {"type": "string", "default": "hermes"}
+                },
+                "required": ["url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "camofox_auth",
+            "description": (
+                "Inject authentication cookies into a camofox browser session. "
+                "Use to access sites that require login without exposing credentials in URLs. "
+                "Pair with camofox_browse to access authenticated content."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string", "description": "Session user ID to inject cookies into"},
+                    "cookies": {
+                        "type": "array",
+                        "description": "List of cookie objects with name, value, domain fields",
+                        "items": {"type": "object"}
+                    }
+                },
+                "required": ["user_id", "cookies"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "camofox_youtube",
+            "description": (
+                "Fetch the full transcript of any YouTube video. "
+                "Use for summarizing talks, extracting technical content, research. "
+                "Much faster than watching the video."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "video_url": {"type": "string", "description": "Full YouTube URL or video ID"},
+                    "language": {"type": "string", "default": "en", "description": "Transcript language code"}
+                },
+                "required": ["video_url"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "generate_image",
+            "description": (
+                "Generate an image using FAL.ai (FLUX Schnell — fastest model, free tier). "
+                "Use for creating logos, mockups, diagrams, marketing assets, or any visual. "
+                "Returns local path and public URL. Requires FAL_API_KEY secret."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "prompt": {"type": "string", "description": "Detailed image description"},
+                    "model": {
+                        "type": "string",
+                        "default": "fal-ai/flux/schnell",
+                        "description": "FAL model: fal-ai/flux/schnell (fast), fal-ai/flux/dev (quality), fal-ai/imagen4/preview"
+                    },
+                    "width": {"type": "integer", "default": 1024},
+                    "height": {"type": "integer", "default": 1024},
+                    "num_inference_steps": {"type": "integer", "default": 4, "description": "4=fast/schnell, 20-50=quality models"}
+                },
+                "required": ["prompt"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "find_skill",
+            "description": (
+                "Search the learned skill index for a proven procedure matching this task. "
+                "Call this FIRST before tackling any complex multi-step task — "
+                "you may have already mastered this exact workflow."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Task description to search for"}
+                },
+                "required": ["query"]
             }
         }
     }
@@ -317,6 +500,259 @@ def _run_camofox_browse_sync(url: str, wait_seconds: int = 3) -> str:
                 pass
 
 
+# ── Layer A: Complete camofox toolkit ────────────────────────────────────────
+
+def _camofox_headers() -> dict:
+    h = {"Content-Type": "application/json"}
+    if CAMOFOX_KEY:
+        h["Authorization"] = f"Bearer {CAMOFOX_KEY}"
+    return h
+
+def _camofox_health_check() -> bool:
+    try:
+        import requests as rlib
+        resp = rlib.get(f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}/health",
+                        headers=_camofox_headers(), timeout=5)
+        return resp.status_code == 200
+    except Exception:
+        return False
+
+def _run_camofox_act(tab_id: str, action: str, **kwargs) -> str:
+    """Interact with an open camofox tab: click, type, scroll, press, navigate."""
+    try:
+        import requests as rlib
+    except ImportError:
+        return "[camofox_act] requests not installed"
+    if not _camofox_health_check():
+        return "[camofox_act] camofox DOWN"
+    base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
+    headers = _camofox_headers()
+    user_id = kwargs.get("user_id", "hermes")
+    try:
+        if action == "click":
+            payload = {"userId": user_id, "selector": kwargs.get("selector", ""), "ref": kwargs.get("ref", "")}
+            r = rlib.post(f"{base}/tabs/{tab_id}/click", json=payload, headers=headers, timeout=10)
+        elif action == "type":
+            payload = {"userId": user_id, "text": kwargs.get("text", ""), "selector": kwargs.get("selector", "")}
+            r = rlib.post(f"{base}/tabs/{tab_id}/type", json=payload, headers=headers, timeout=10)
+        elif action == "scroll":
+            payload = {"userId": user_id, "direction": kwargs.get("direction", "down"), "amount": kwargs.get("amount", 500)}
+            r = rlib.post(f"{base}/tabs/{tab_id}/scroll", json=payload, headers=headers, timeout=10)
+        elif action == "press":
+            payload = {"userId": user_id, "key": kwargs.get("key", "Enter")}
+            r = rlib.post(f"{base}/tabs/{tab_id}/press", json=payload, headers=headers, timeout=10)
+        elif action == "navigate":
+            payload = {"userId": user_id, "url": kwargs.get("url", "")}
+            r = rlib.post(f"{base}/tabs/{tab_id}/navigate", json=payload, headers=headers, timeout=10)
+        elif action in ("back", "forward", "refresh"):
+            payload = {"userId": user_id}
+            r = rlib.post(f"{base}/tabs/{tab_id}/{action}", json=payload, headers=headers, timeout=10)
+        else:
+            return f"[camofox_act] Unknown action: {action}"
+        if r.status_code == 200:
+            data = r.json()
+            # Get snapshot after action
+            import time as _t
+            _t.sleep(1)
+            snap = rlib.get(f"{base}/tabs/{tab_id}/snapshot", headers=headers, timeout=10).json()
+            text = snap.get("text", "")[:4000]
+            return f"[camofox_act:{action}] OK\nPage state:\n{text}"
+        return f"[camofox_act:{action}] HTTP {r.status_code}: {r.text[:300]}"
+    except Exception as exc:
+        return f"[camofox_act:{action}] Error: {exc}"
+
+def _run_camofox_extract(url: str, schema: dict, wait_seconds: int = 3, user_id: str = "hermes") -> str:
+    """Extract structured data from a page using a JSON schema via camofox POST /tabs/{id}/extract."""
+    try:
+        import requests as rlib
+    except ImportError:
+        return "[camofox_extract] requests not installed"
+    if not _camofox_health_check():
+        return "[camofox_extract] camofox DOWN — use web_fetch + regex fallback"
+    base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
+    headers = _camofox_headers()
+    session_id = f"hermes-ext-{uuid.uuid4().hex[:8]}"
+    tab_id = None
+    try:
+        resp = rlib.post(f"{base}/tabs",
+                         json={"userId": session_id, "sessionKey": "extract", "url": url},
+                         headers=headers, timeout=12)
+        data = resp.json()
+        tab_id = data.get("tabId") or data.get("id") or data.get("tab_id")
+        if not tab_id:
+            return f"[camofox_extract] Tab creation failed: {data}"
+        import time as _t
+        _t.sleep(wait_seconds)
+        extract_resp = rlib.post(
+            f"{base}/tabs/{tab_id}/extract",
+            json={"userId": session_id, "schema": schema},
+            headers=headers, timeout=20,
+        )
+        extracted = extract_resp.json()
+        return json.dumps(extracted, indent=2)[:6000]
+    except Exception as exc:
+        return f"[camofox_extract] Error: {exc}"
+    finally:
+        if tab_id:
+            try:
+                rlib.delete(f"{base}/tabs/{tab_id}", headers=headers, timeout=5)
+            except Exception:
+                pass
+
+def _run_camofox_screenshot(url: str, wait_seconds: int = 2, user_id: str = "hermes") -> str:
+    """Take a screenshot of a URL. Returns local path to PNG."""
+    try:
+        import requests as rlib
+    except ImportError:
+        return "[camofox_screenshot] requests not installed"
+    if not _camofox_health_check():
+        return "[camofox_screenshot] camofox DOWN"
+    base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
+    headers = _camofox_headers()
+    session_id = f"hermes-ss-{uuid.uuid4().hex[:8]}"
+    tab_id = None
+    try:
+        resp = rlib.post(f"{base}/tabs",
+                         json={"userId": session_id, "sessionKey": "screenshot", "url": url},
+                         headers=headers, timeout=12)
+        data = resp.json()
+        tab_id = data.get("tabId") or data.get("id") or data.get("tab_id")
+        if not tab_id:
+            return f"[camofox_screenshot] Tab creation failed: {data}"
+        import time as _t
+        _t.sleep(wait_seconds)
+        ss_resp = rlib.get(f"{base}/tabs/{tab_id}/screenshot", headers=headers, timeout=20)
+        if ss_resp.status_code != 200:
+            return f"[camofox_screenshot] HTTP {ss_resp.status_code}: {ss_resp.text[:200]}"
+        # Save PNG to hermes home
+        img_dir = Path(HERMES_HOME) / "screenshots"
+        img_dir.mkdir(parents=True, exist_ok=True)
+        ts = int(time.time())
+        safe_url = re.sub(r'[^a-z0-9]', '_', url.lower())[:40]
+        out_path = img_dir / f"{ts}_{safe_url}.png"
+        out_path.write_bytes(ss_resp.content)
+        return f"[camofox_screenshot] Screenshot saved: {out_path} ({len(ss_resp.content)} bytes)"
+    except Exception as exc:
+        return f"[camofox_screenshot] Error: {exc}"
+    finally:
+        if tab_id:
+            try:
+                rlib.delete(f"{base}/tabs/{tab_id}", headers=headers, timeout=5)
+            except Exception:
+                pass
+
+def _run_camofox_auth(user_id: str, cookies: list) -> str:
+    """Inject cookies into a camofox session for authenticated browsing."""
+    try:
+        import requests as rlib
+    except ImportError:
+        return "[camofox_auth] requests not installed"
+    if not _camofox_health_check():
+        return "[camofox_auth] camofox DOWN"
+    base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
+    headers = _camofox_headers()
+    try:
+        resp = rlib.post(
+            f"{base}/sessions/{user_id}/cookies",
+            json={"cookies": cookies},
+            headers=headers,
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return f"[camofox_auth] {len(cookies)} cookies injected into session '{user_id}'. Now use camofox_browse with the same user_id."
+        return f"[camofox_auth] HTTP {resp.status_code}: {resp.text[:300]}"
+    except Exception as exc:
+        return f"[camofox_auth] Error: {exc}"
+
+def _run_camofox_youtube(video_url: str, language: str = "en") -> str:
+    """Fetch a YouTube video transcript via camofox /youtube/transcript."""
+    try:
+        import requests as rlib
+    except ImportError:
+        return "[camofox_youtube] requests not installed"
+    if not _camofox_health_check():
+        # Fallback: yt-dlp
+        return _youtube_fallback(video_url, language)
+    base = f"http://{CAMOFOX_HOST}:{CAMOFOX_PORT}"
+    headers = _camofox_headers()
+    # Extract video ID
+    vid_match = re.search(r'(?:v=|youtu\.be/|/embed/)([a-zA-Z0-9_-]{11})', video_url)
+    video_id = vid_match.group(1) if vid_match else video_url.strip()
+    try:
+        resp = rlib.get(
+            f"{base}/youtube/transcript",
+            params={"videoId": video_id, "lang": language},
+            headers=headers,
+            timeout=30,
+        )
+        if resp.status_code == 200:
+            data = resp.json()
+            transcript = data.get("transcript") or data.get("text") or json.dumps(data)[:6000]
+            return transcript[:6000] + ("\n...[truncated]" if len(str(transcript)) > 6000 else "")
+        return f"[camofox_youtube] HTTP {resp.status_code}: {resp.text[:300]}"
+    except Exception as exc:
+        return _youtube_fallback(video_url, language)
+
+def _youtube_fallback(video_url: str, language: str = "en") -> str:
+    """yt-dlp fallback for YouTube transcripts."""
+    try:
+        result = subprocess.run(
+            ["yt-dlp", "--skip-download", "--write-auto-sub", "--sub-lang", language,
+             "--sub-format", "vtt", "-o", "/tmp/hermes_yt_%(id)s", video_url],
+            capture_output=True, text=True, timeout=60,
+        )
+        import glob
+        vtt_files = glob.glob("/tmp/hermes_yt_*.vtt")
+        if vtt_files:
+            content = Path(vtt_files[0]).read_text()
+            # Strip VTT header/timestamps
+            lines = [l for l in content.splitlines()
+                     if l and not l.startswith("WEBVTT") and "-->" not in l
+                     and not re.match(r'^\d{2}:', l)]
+            return "\n".join(lines)[:6000]
+        return f"[camofox_youtube] yt-dlp: {result.stderr[:300]}"
+    except FileNotFoundError:
+        return "[camofox_youtube] Neither camofox /youtube/transcript nor yt-dlp available"
+    except Exception as exc:
+        return f"[camofox_youtube] Fallback error: {exc}"
+
+def _run_generate_image(prompt: str, model: str = "fal-ai/flux/schnell",
+                         width: int = 1024, height: int = 1024,
+                         num_inference_steps: int = 4) -> str:
+    """Generate image via FAL.ai."""
+    if not _image_gen_available:
+        return "[generate_image] rhodawk_core.image_gen not loaded — check /app/rhodawk_core/image_gen.py"
+    if not FAL_API_KEY:
+        return ("[generate_image] FAL_API_KEY not set. "
+                "Get a free key at https://fal.ai and add it as FAL_API_KEY secret.")
+    result = _fal_generate(
+        prompt=prompt,
+        model=model,
+        width=width,
+        height=height,
+        num_inference_steps=num_inference_steps,
+    )
+    msg = _fal_format_result(result)
+    if result.success and result.local_path:
+        # Signal Telegram to send the image as a photo
+        return f"[IMAGE_GENERATED]\npath={result.local_path}\nurl={result.image_url}\n{msg}"
+    return msg
+
+def _run_find_skill(query: str) -> str:
+    """Search the learned skill index."""
+    if not _skill_engine_available:
+        return "[find_skill] skill_engine not available — check /app/rhodawk_core/skill_engine.py"
+    try:
+        engine = get_skill_engine()
+        context = engine.build_skill_context(query)
+        if context:
+            return context
+        index_summary = engine.get_skill_index_summary()
+        return f"[find_skill] No matching skill found.\n\n{index_summary}"
+    except Exception as exc:
+        return f"[find_skill] Error: {exc}"
+
+
 async def _execute_tool(name: str, args: dict) -> str:
     if name == "terminal":
         return await asyncio.to_thread(_run_terminal, args.get("command", ""), args.get("timeout", 60))
@@ -324,6 +760,44 @@ async def _execute_tool(name: str, args: dict) -> str:
         return await asyncio.to_thread(_run_web_fetch, args.get("url", ""), args.get("timeout", 15))
     elif name == "camofox_browse":
         return await asyncio.to_thread(_run_camofox_browse_sync, args.get("url", ""), args.get("wait_seconds", 3))
+    elif name == "camofox_act":
+        return await asyncio.to_thread(
+            _run_camofox_act,
+            args.get("tab_id", ""), args.get("action", ""),
+            **{k: v for k, v in args.items() if k not in ("tab_id", "action")}
+        )
+    elif name == "camofox_extract":
+        return await asyncio.to_thread(
+            _run_camofox_extract,
+            args.get("url", ""), args.get("schema", {}),
+            args.get("wait_seconds", 3), args.get("user_id", "hermes"),
+        )
+    elif name == "camofox_screenshot":
+        return await asyncio.to_thread(
+            _run_camofox_screenshot,
+            args.get("url", ""), args.get("wait_seconds", 2), args.get("user_id", "hermes"),
+        )
+    elif name == "camofox_auth":
+        return await asyncio.to_thread(
+            _run_camofox_auth,
+            args.get("user_id", "hermes"), args.get("cookies", []),
+        )
+    elif name == "camofox_youtube":
+        return await asyncio.to_thread(
+            _run_camofox_youtube,
+            args.get("video_url", ""), args.get("language", "en"),
+        )
+    elif name == "generate_image":
+        return await asyncio.to_thread(
+            _run_generate_image,
+            args.get("prompt", ""),
+            args.get("model", "fal-ai/flux/schnell"),
+            args.get("width", 1024),
+            args.get("height", 1024),
+            args.get("num_inference_steps", 4),
+        )
+    elif name == "find_skill":
+        return await asyncio.to_thread(_run_find_skill, args.get("query", ""))
     return f"[gateway] Unknown tool: {name}"
 
 
@@ -568,11 +1042,11 @@ def _load_soul() -> str:
     return "You are Hermes, Rhodawk AI intelligence. Execute first, report after."
 
 
-# FIX-G: Correct Brave API URL | FIX-H: DDG fallback instruction
+# Layers A/E/F/G/H: Updated runtime block with full tool roster + 4-tier search + skill index
 _RUNTIME_BLOCK = """
 
 ═══════════════════════════════════════════════════════
-HERMES RUNTIME v7.0 — READ BEFORE EVERY RESPONSE
+HERMES RUNTIME v8.0 — READ BEFORE EVERY RESPONSE
 ═══════════════════════════════════════════════════════
 
 UTC NOW:       {utc_ts}
@@ -583,11 +1057,20 @@ NOTES:         {operator_notes}
 LAST TASK:     {last_task}
 MODEL:         {model}
 GITHUB PAT:    {github_pat_status}
-BRAVE SEARCH:  {brave_status}
+SEARCH STACK:  {search_status}
+IMAGE GEN:     {image_status}
 
 ──── LONG-TERM MEMORY (auto-loaded every session) ────
 {memory_block}
 ──── END MEMORY ────
+
+──── OPERATOR BEHAVIORAL MODEL ────
+{operator_model_block}
+──── END OPERATOR MODEL ────
+
+──── LEARNED SKILLS ────
+{skill_index_block}
+──── END SKILLS ────
 
 ──── ENVIRONMENT STATUS ────
 {briefing_block}
@@ -595,27 +1078,63 @@ BRAVE SEARCH:  {brave_status}
 
 ══════════════════════════════════════════════════════
 TOOLS — call these, never narrate them:
-  terminal       — real bash. Use for EVERYTHING executable.
-  web_fetch      — curl + HTML strip. Public APIs, raw files.
-  camofox_browse — headless Chromium. JS sites, Cloudflare.
 
-WEB SEARCH — ALWAYS call terminal first. NEVER write results from memory:
+CORE:
+  terminal              — real bash. Use for EVERYTHING executable.
+  web_fetch             — curl + HTML strip. Public APIs, raw files.
+  find_skill            — search learned skill index BEFORE any complex task.
 
-  DDG (default, no API key needed):
+STEALTH BROWSER (Layer A — complete camofox toolkit):
+  camofox_browse        — headless Chromium. JS SPAs, Cloudflare, LinkedIn, YouTube.
+  camofox_act           — interact with open tab: click/type/scroll/press/navigate.
+  camofox_extract       — extract structured JSON from page using schema.
+  camofox_screenshot    — screenshot URL → local PNG file.
+  camofox_auth          — inject cookies into session for authenticated browsing.
+  camofox_youtube       — full transcript of any YouTube video.
+
+BROWSER SEARCH MACROS (use inside camofox_browse url field):
+  @google_search?q=QUERY          → Google search via stealth browser
+  @bing_search?q=QUERY            → Bing search
+  @duckduckgo_search?q=QUERY      → DDG search
+  @linkedin_search?q=QUERY        → LinkedIn people/company search
+
+IMAGE GENERATION (Layer H — FAL.ai):
+  generate_image        — create images via FLUX Schnell (free tier, fast). Sends as Telegram photo.
+
+WEB SEARCH — 4-TIER CASCADE (Layer G). NEVER say "search unavailable":
+
+  Tier 1 — DDG (default, no key, always works):
     python3 -c '
 from duckduckgo_search import DDGS
 for r in DDGS().text("QUERY HERE", max_results=5):
     print(r["title"]); print(r["href"]); print(r["body"][:300]); print()
 '
 
-  Brave (when BRAVE_API_KEY is set):
+  Tier 2 — Brave (higher quality, BRAVE_API_KEY required):
     curl -s "https://api.search.brave.com/res/v1/web/search?q=QUERY&count=5" \
       -H "Accept: application/json" \
       -H "X-Subscription-Token: $BRAVE_API_KEY" | \
       jq -r '.web.results[] | "\(.title)\n\(.url)\n\(.description)\n"'
 
-  IMPORTANT: If Brave returns error or empty, immediately retry with DDG.
-  NEVER say "search unavailable". Always try DDG as fallback.
+  Tier 3 — Exa AI (semantic, EXA_API_KEY required):
+    curl -s "https://api.exa.ai/search" \
+      -H "x-api-key: $EXA_API_KEY" -H "Content-Type: application/json" \
+      -d '{{"query":"QUERY","numResults":5,"useAutoprompt":true}}' | jq '.results[]'
+
+  Tier 4 — camofox Google (always works, cannot be blocked):
+    Use camofox_browse with url="@google_search?q=QUERY"
+
+  RULE: If tier N fails, immediately try tier N+1. Never declare search failed.
+
+JCODE PERSISTENT SESSIONS (Layer B):
+  python3 /app/skills/jcode_swarm/session_manager.py \
+    --project "OWNER/REPO" --task "task description" --workdir /tmp/repos/REPO
+
+SUB-AGENTS:
+  openclaude: python3 /app/skills/openclaude_grpc/client.py --prompt "..." --workdir DIR
+  jcode:      OPENAI_BASE_URL=$DO_INFERENCE_BASE_URL OPENAI_API_KEY=$DO_INFERENCE_API_KEY \
+              jcode run --message "..." --session SESSION_KEY
+  health:     python3 /app/bot/telegram_bot.py health-check
 
 VERSION CHECKS — always call terminal, never write from memory:
   python3 --version && pip show openai | grep Version
@@ -626,20 +1145,10 @@ API LISTS — always call terminal:
 
 FILE DELIVERY — THE ONLY WAY TO SEND A FILE IS WITH %%FILE%% TAGS IN YOUR REPLY:
 
-  When user asks to "create and send", "make and send", "write and deliver" a file:
-  Step 1: Write the file content DIRECTLY into your reply inside %%FILE%% tags.
-  Step 2: Do NOT echo it to disk first. Do NOT say "I've attached". Just output the tags.
-
-  CORRECT — this is what actually sends a file to the user:
   %%FILE:check.sh%%
   #!/bin/bash
   echo hello world
   %%/FILE%%
-
-  WRONG — these NEVER deliver a file to the user:
-  - echo "echo hello world" > check.sh    (writes to container disk only, user gets nothing)
-  - "The file is attached"                (it is not attached, nothing was sent)
-  - "Here is the content:"               (inline text, not a file attachment)
 
   THE GATEWAY INTERCEPTS %%FILE%% TAGS AND SENDS THEM AS REAL TELEGRAM DOCUMENTS.
   If you don't use the tags, no file is ever sent. Period.
@@ -651,24 +1160,22 @@ GIT PUSH — use push-commit utility. NEVER bare git push (no credentials):
     --workdir /tmp/repos/REPONAME \
     --message "feat: description"
 
-SUB-AGENTS:
-  openclaude: python3 /app/skills/openclaude_grpc/client.py --prompt "..." --workdir DIR
-  jcode:      OPENAI_BASE_URL=$DO_INFERENCE_BASE_URL OPENAI_API_KEY=$DO_INFERENCE_API_KEY jcode run --message "..."
-  health:     python3 /app/bot/telegram_bot.py health-check
-
 ABSOLUTE RULES — breaking any = Jarvis failure:
   1. TOOLS BEFORE TEXT. For any data/action query: call terminal first.
-  2. ZERO FABRICATION. Search results, versions, stats, file content = tool call required.
-  3. FILE TAG. Any file goes in %%FILE:%% tags. "Here it is:" with inline text = FAILURE.
-  4. PUSH-COMMIT. Never bare git push. Always push-commit.
-  5. NUMBERS from tool output only. Verbatim. No rounding.
-  6. DATE = UTC timestamp above. Not training data.
-  7. ADDRESS OPERATOR BY NAME. Use "{operator_name}" naturally.
-  8. DDG FALLBACK. If any search/API fails, retry with DDG immediately.
+  2. SKILL FIRST. Before any complex multi-step task: call find_skill.
+  3. ZERO FABRICATION. Search results, versions, stats, file content = tool call required.
+  4. FILE TAG. Any file goes in %%FILE:%% tags. "Here it is:" with inline text = FAILURE.
+  5. PUSH-COMMIT. Never bare git push. Always push-commit.
+  6. NUMBERS from tool output only. Verbatim. No rounding.
+  7. DATE = UTC timestamp above. Not training data.
+  8. ADDRESS OPERATOR BY NAME. Use "{operator_name}" naturally.
+  9. SEARCH CASCADE. DDG → Brave → Exa → camofox. Never declare search failed.
+  10. JCODE SESSIONS. Use --session flag to persist jcode memory across tasks.
 ══════════════════════════════════════════════════════
 """
 
-def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = False) -> str:
+def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = False,
+                          task_description: str = "") -> str:
     utc_ts         = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     operator_name  = "Operator"
     telegram_username = "unknown"
@@ -690,6 +1197,41 @@ def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = Fa
     memory_block   = _read_memory_for_context(3000) or "(empty — no entries yet)"
     briefing_block = _build_briefing_block() if is_fresh_session else "(mid-session)"
 
+    # Layer F: Operator behavioral model
+    operator_model_block = "(not yet built)"
+    if _operator_model_available and user_id:
+        try:
+            op_model = get_operator_model(user_id)
+            operator_model_block = op_model.build_prompt_context()
+        except Exception as _exc:
+            logger.debug(f"[operator_model] Build failed: {_exc}")
+
+    # Layer E: Skill index
+    skill_index_block = "(no skills learned yet)"
+    if _skill_engine_available:
+        try:
+            engine = get_skill_engine(model=MODEL)
+            skill_index_block = engine.get_skill_index_summary()
+            # If we have a task description, prepend matching skill context
+            if task_description:
+                skill_ctx = engine.build_skill_context(task_description)
+                if skill_ctx:
+                    skill_index_block = skill_ctx + "\n" + skill_index_block
+        except Exception as _exc:
+            logger.debug(f"[skill_engine] Context build failed: {_exc}")
+
+    # Layer G: Search status
+    search_tiers = ["DDG(always)"]
+    if BRAVE_API_KEY:
+        search_tiers.append("Brave")
+    if EXA_API_KEY:
+        search_tiers.append("Exa-AI")
+    search_tiers.append("camofox-Google(stealth)")
+    search_status = " → ".join(search_tiers)
+
+    # Layer H: Image generation status
+    image_status = f"FAL.ai FLUX/Schnell (SET)" if FAL_API_KEY else "NOT SET — add FAL_API_KEY secret"
+
     runtime = _RUNTIME_BLOCK.format(
         utc_ts=utc_ts,
         operator_name=operator_name,
@@ -699,8 +1241,11 @@ def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = Fa
         last_task=last_task,
         model=MODEL,
         github_pat_status="SET" if GITHUB_PAT else "NOT SET — pushes will fail",
-        brave_status="SET — use Brave first, DDG fallback" if BRAVE_API_KEY else "NOT SET — use DDG only",
+        search_status=search_status,
+        image_status=image_status,
         memory_block=memory_block,
+        operator_model_block=operator_model_block,
+        skill_index_block=skill_index_block,
         briefing_block=briefing_block,
     )
 
@@ -1157,6 +1702,58 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
         )
 
 
+async def _post_task_hooks(
+    user_id: int,
+    user_msg: str,
+    reply: str,
+    tool_calls_log: list,
+    tool_round_count: int,
+    task_start_time: float,
+    succeeded: bool,
+) -> None:
+    """
+    Layer E + F: Post-task hooks.
+    - Skill engine: evaluate task for skill creation
+    - Operator model: infer behavioral patterns from task execution
+    """
+    duration_s = time.time() - task_start_time
+
+    # Layer E: Skill engine
+    if _skill_engine_available and tool_round_count >= 2:
+        try:
+            engine = get_skill_engine(model=MODEL)
+            execution = TaskExecution(
+                task_description=user_msg[:500],
+                tool_calls_made=tool_calls_log,
+                result_summary=reply[:300],
+                duration_seconds=duration_s,
+                tool_round_count=tool_round_count,
+                succeeded=succeeded,
+                model_used=MODEL,
+            )
+            skill = engine.evaluate_for_skill_creation(execution)
+            if skill:
+                engine.save_skill(skill)
+                logger.info(f"[skill_engine] Learned new skill: {skill.title}")
+        except Exception as exc:
+            logger.debug(f"[skill_engine] Post-task hook failed: {exc}")
+
+    # Layer F: Operator model inference
+    if _operator_model_available:
+        try:
+            op_model = get_operator_model(user_id)
+            op_model.infer_from_task(
+                task=user_msg,
+                result=reply[:300],
+                tool_calls=tool_calls_log,
+                duration_s=duration_s,
+                timestamp=task_start_time,
+            )
+            op_model.infer_from_explicit(user_msg)
+        except Exception as exc:
+            logger.debug(f"[operator_model] Post-task hook failed: {exc}")
+
+
 async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not update.message or not update.message.text:
         return
@@ -1166,6 +1763,7 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
 
     user_id  = update.effective_user.id
     user_msg = update.message.text.strip()
+    task_start = time.time()
 
     # Sync Telegram identity + update last_seen on every message
     _sync_profile_from_telegram(update)
@@ -1178,8 +1776,12 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     history.append({"role": "user", "content": user_msg})
     history = _trim(history)
 
-    # JARVIS-1+2+3: system prompt with memory + profile + briefing
-    system_prompt = _build_system_prompt(user_id, is_fresh_session=fresh_session)
+    # JARVIS-1+2+3 + Layer E/F: system prompt with memory + profile + briefing + skills + operator model
+    system_prompt = _build_system_prompt(
+        user_id,
+        is_fresh_session=fresh_session,
+        task_description=user_msg,
+    )
     messages = [{"role": "system", "content": system_prompt}] + list(history)
 
     try:
@@ -1192,7 +1794,55 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
             _auto_write_memory(user_msg, reply)
             _upsert_profile(user_id, last_task=user_msg.strip()[:200])
 
-        await _deliver_reply(update, reply)
+        # Layer E + F: Post-task hooks (skill learning + operator modeling)
+        # Collect tool round count from message history
+        tool_rounds = sum(
+            1 for m in messages if m.get("role") == "tool"
+        )
+        tool_calls_log = [
+            {"name": m.get("name", ""), "arguments": {}}
+            for m in messages if m.get("role") == "tool"
+        ]
+        asyncio.get_event_loop().call_soon(
+            lambda: asyncio.ensure_future(
+                _post_task_hooks(
+                    user_id=user_id,
+                    user_msg=user_msg,
+                    reply=reply,
+                    tool_calls_log=tool_calls_log,
+                    tool_round_count=tool_rounds,
+                    task_start_time=task_start,
+                    succeeded=not reply.startswith("[hermes] Max tool rounds"),
+                )
+            )
+        )
+
+        # Layer H: If reply contains [IMAGE_GENERATED], send as Telegram photo
+        if "[IMAGE_GENERATED]" in reply:
+            import re as _re
+            img_path_match = _re.search(r'path=([^\n]+)', reply)
+            img_url_match  = _re.search(r'url=([^\n]+)', reply)
+            img_path = img_path_match.group(1).strip() if img_path_match else ""
+            img_url  = img_url_match.group(1).strip() if img_url_match else ""
+            try:
+                if img_path and Path(img_path).exists():
+                    with open(img_path, "rb") as fh:
+                        await update.message.reply_photo(
+                            photo=fh,
+                            caption=reply.split("\n", 3)[-1][:900],
+                        )
+                elif img_url:
+                    await update.message.reply_photo(
+                        photo=img_url,
+                        caption=reply.split("\n", 3)[-1][:900],
+                    )
+                else:
+                    await _deliver_reply(update, reply.replace("[IMAGE_GENERATED]\n", ""))
+            except Exception as img_exc:
+                logger.warning(f"[gateway] Image send failed: {img_exc}")
+                await _deliver_reply(update, reply)
+        else:
+            await _deliver_reply(update, reply)
 
     except Exception as exc:
         logger.error(f"[gateway] Error user {user_id}: {exc}", exc_info=True)

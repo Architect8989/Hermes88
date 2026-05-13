@@ -476,6 +476,96 @@ cp /app/skills/security-audit/SKILL.md /data/.hermes/skills/security-audit/SKILL
 cp /app/skills/security-audit/aggregate.py /data/.hermes/skills/security-audit/aggregate.py
 cp /app/skills/stealth-browse/SKILL.md /data/.hermes/skills/stealth-browse/SKILL.md
 echo "[skills] Peak skills deployed: openclaude_grpc, jcode_swarm, openclaw_channel, research-deep, competitive-intel, security-audit, stealth-browse."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer D: Inject SOUL.md into openclaw workspace
+# openclaw uses the workspace as context for all channel messages.
+# Copying SOUL.md ensures Hermes's persona, rules, and capabilities are
+# preserved when messages are relayed through Discord/Slack/WhatsApp.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "[layer-d] Injecting SOUL.md into openclaw workspace..."
+mkdir -p /data/.openclaw/workspace
+cp /app/hermes_config/SOUL.md /data/.openclaw/workspace/SOUL.md
+# Also write a CONTEXT.md summarising the channel integration setup
+python3 - << 'PYEOF'
+import pathlib, os, datetime
+ctx_path = pathlib.Path("/data/.openclaw/workspace/CONTEXT.md")
+ctx_path.write_text(f"""# Hermes Channel Context
+Generated: {datetime.datetime.utcnow().isoformat()}Z
+
+This workspace is the Hermes intelligent relay. Messages arriving through
+any channel (Telegram, Discord, Slack, WhatsApp) are processed by the same
+Hermes AI with the same SOUL.md persona and rules.
+
+## Active Channels
+- Telegram: primary operator interface (hermes-gateway owns the token)
+- Other channels: relayed via openclaw gateway on port 18789
+
+## Key Facts
+- Agent: Rhodawk AI Hermes v8.0 (Jarvis + 8-Layer Architecture)
+- Operator: Solo founder, YOLO mode always on
+- Model: deepseek-v4-pro via DigitalOcean Inference
+- Memory: /data/.hermes/memories/MEMORY.md (auto-injected every session)
+- SOUL: See SOUL.md in this directory
+- Skills: /data/.hermes/skills/_learned/ (learned from completed tasks)
+""")
+print("[layer-d] /data/.openclaw/workspace/CONTEXT.md written")
+PYEOF
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer B: Pre-warm jcode session for primary repo
+# jcode's memory system only activates when the same session is reused.
+# Pre-warming creates the session entry so the first task benefits immediately.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "[layer-b] Pre-warming jcode session for primary repo..."
+mkdir -p /data/.hermes/jcode_sessions /tmp/repos/Hermes88
+python3 - << 'PYEOF'
+import sys, pathlib
+sys.path.insert(0, '/app')
+try:
+    from skills.jcode_swarm.session_manager import get_session_manager
+    manager = get_session_manager()
+    manager.prewarm_sessions([
+        "Architect8989/Hermes88",
+    ])
+    print("[layer-b] jcode sessions pre-warmed")
+except Exception as exc:
+    print(f"[layer-b] Pre-warm skipped (jcode not installed): {exc}")
+PYEOF
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer E: Initialize skill engine directories
+# ─────────────────────────────────────────────────────────────────────────────
+echo "[layer-e] Initializing skill engine directories..."
+mkdir -p /data/.hermes/skills/_learned
+# If no INDEX.json exists yet, create an empty one
+[ -f /data/.hermes/skills/INDEX.json ] || echo '{}' > /data/.hermes/skills/INDEX.json
+echo "[layer-e] Skill engine ready: /data/.hermes/skills/_learned/"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer F: Initialize operator model database tables
+# ─────────────────────────────────────────────────────────────────────────────
+echo "[layer-f] Initializing operator model schema..."
+python3 - << 'PYEOF'
+import sys
+sys.path.insert(0, '/app')
+try:
+    from rhodawk_core.operator_model import _ensure_schema
+    from pathlib import Path
+    db_path = Path("/data/.hermes/sessions/conversations.db")
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _ensure_schema(db_path)
+    print("[layer-f] Operator model schema initialized")
+except Exception as exc:
+    print(f"[layer-f] Schema init skipped: {exc}")
+PYEOF
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Layer H: Create image output directory
+# ─────────────────────────────────────────────────────────────────────────────
+mkdir -p /data/.hermes/images /data/.hermes/screenshots
+echo "[layer-h] FAL.ai image output directories created"
+
 echo ""
 echo "[supervisord] Starting hermes-gateway + openclaude-grpc + jcode + openclaw-gateway..."
 exec supervisord -c /etc/supervisor/conf.d/rhodawk.conf
