@@ -1,28 +1,29 @@
 #!/usr/bin/env python3
 """
-gateway/run.py — Rhodawk AI Telegram Gateway v6.0 (Jarvis-Architecture)
+gateway/run.py — Rhodawk AI Telegram Gateway v7.0 (Jarvis-Architecture)
 
-The core Jarvis insight implemented here:
-  Jarvis never has to "go fetch" who Tony Stark is.
-  Context is INJECTED before every message, not discovered during it.
+v7.0 fixes over v3.0 (what was actually running on the VPS):
+  JARVIS-1  MEMORY.md auto-injected into every system prompt — model always starts
+            knowing everything written, zero cold starts
+  JARVIS-2  User profile auto-injected — name, notes, first seen, last task always
+            in context; /reset clears conversation but never profile
+  JARVIS-3  Session-start briefing — first message of session gets real git log,
+            service status, recent memory block injected automatically
+  JARVIS-4  Mandatory post-task memory write — system writes summary after every
+            task automatically; model doesn't choose to remember, it always does
+  JARVIS-5  tool_choice="required" enforced for first 2 rounds on data queries —
+            model cannot skip tools and write fabricated search results
 
-Architecture (v6.0):
-  JARVIS-1  MEMORY.md auto-injected into every system prompt
-            (last 3000 chars of long-term memory is always in context)
-  JARVIS-2  User profile auto-injected (name, notes, first seen, last task)
-  JARVIS-3  Session-start briefing — first message of new session gets
-            a pre-loaded status block (git log, running services, last task)
-  JARVIS-4  Mandatory post-task memory write — after every successful
-            agent_loop the system AUTOMATICALLY appends a summary to MEMORY.md
-            The model doesn't have to "choose" to remember. It always does.
-  JARVIS-5  tool_choice="required" held for first 2 rounds on data queries
-            (not just first call) — closes the second-round fabrication escape
-  FIX-A    Anti-fabrication: data query classifier + tool_choice enforcement
-  FIX-B    Fabrication interceptor: detects fake search results in text responses
-  FIX-C    User profile persistence (user_profiles SQLite table, never reset)
-  FIX-D    %%FILE:%% file delivery with concrete example in prompt
-  FIX-E    Bare git push intercepted → push-commit utility
-  FIX-F    /profile command (view / set name / set notes)
+  FIX-A  Anti-fabrication interceptor — catches fake search/stat/file output
+         when no tool call was made; forces tool-required retry
+  FIX-B  Data query classifier — pattern matches search/fetch/run/count queries
+  FIX-C  User profile SQLite table — never cleared by /reset, /profile command
+  FIX-D  %%FILE:%% delivery contract — terminal intercept blocks "say attached"
+  FIX-E  Bare git push intercepted — redirected to push-commit utility
+  FIX-F  Scratchpad extraction hardened — hex strings and prose no longer
+         extracted as shell commands
+  FIX-G  Brave API URL corrected — /res/v1/web/search?q= not /v1/web?query=
+  FIX-H  DDG auto-fallback when Brave/search fails — injected as correction
 """
 
 import asyncio
@@ -76,7 +77,7 @@ MAX_HISTORY     = 20
 MAX_TOOL_ROUNDS = 25
 
 if not BRAVE_API_KEY:
-    logger.warning("[gateway] BRAVE_API_KEY not set — DuckDuckGo will be used for search")
+    logger.warning("[gateway] BRAVE_API_KEY not set — DuckDuckGo fallback active")
 if not GITHUB_PAT:
     logger.warning("[gateway] GITHUB_PAT not set — git push via push-commit will fail")
 
@@ -93,25 +94,25 @@ def _is_allowed(chat_id: int) -> bool:
     return True if not ALLOWED_CHAT_IDS else chat_id in ALLOWED_CHAT_IDS
 
 
-# ── FIX-A: Data query classifier ─────────────────────────────────────────────
+# ── FIX-B: Data query classifier ─────────────────────────────────────────────
 _DATA_QUERY_RE = re.compile(
     r"\b("
-    r"search|find|look up|look for|latest|recent|current|now|today|"
+    r"search|find|look ?up|look for|latest|recent|current|now|today|"
     r"how many|how much|count|number of|what is the|what are the|"
     r"fetch|get|retrieve|pull|check|status of|price of|value of|"
-    r"news|article|headline|update|report|"
+    r"news|article|headline|update|report|list all|list the|"
     r"star[s]?|fork[s]?|issue[s]?|commit[s]?|repo|repository|"
     r"push|commit|deploy|run|execute|create|write|generate|make|build|"
-    r"clone|install|send|post|upload|download|"
-    r"github|huggingface|twitter|linkedin|youtube|"
-    r"tell me about|show me|give me|list"
+    r"clone|install|send|post|upload|download|available|"
+    r"github|huggingface|twitter|linkedin|youtube|digitalocean|"
+    r"tell me|show me|give me|what version|which version"
     r")\b",
     re.IGNORECASE,
 )
 _PURE_CONVO_RE = re.compile(
-    r"^(hi|hello|hey|thanks|thank you|ok|okay|sure|got it|great|good|"
+    r"^(hi+|hello|hey|thanks|thank you|ok+|okay|sure|got it|great|good morning|good night|"
     r"what does .{1,30} stand for|who are you|what is your name|"
-    r"explain .{1,60}|define .{1,60}|what is a .{1,40})[\s\?\.!]*$",
+    r"explain .{1,60}|define .{1,60})[\s\?\.!]*$",
     re.IGNORECASE,
 )
 
@@ -121,15 +122,16 @@ def _is_data_query(text: str) -> bool:
     return bool(_DATA_QUERY_RE.search(text))
 
 
-# ── FIX-B: Anti-fabrication detector ─────────────────────────────────────────
+# ── FIX-A: Anti-fabrication detector ─────────────────────────────────────────
 _FAKE_PATTERNS = [
-    re.compile(r"Title:\s+.+\nURL:\s+https?://", re.MULTILINE),
-    re.compile(r"Running Brave Search for", re.IGNORECASE),
+    re.compile(r"^Title:\s+.{10,}\nURL:\s+https?://", re.MULTILINE),
+    re.compile(r"Running Brave Search (query|for)\s*:", re.IGNORECASE),
     re.compile(r"as of (January|February|March|April|May|June|July|August|September|October|November|December) 20\d\d", re.IGNORECASE),
     re.compile(r"^Description:\s+.{20,}", re.MULTILINE),
     re.compile(r"Here'?s? (a |the )?production.ready", re.IGNORECASE),
-    re.compile(r"Here'?s? (the )?(file|content|code|result|output)\s*:", re.IGNORECASE),
     re.compile(r"latest articles and resources", re.IGNORECASE),
+    re.compile(r"Visit the Official Documentation", re.IGNORECASE),
+    re.compile(r"follow these steps.*\n.*\n.*documentation", re.IGNORECASE | re.DOTALL),
 ]
 
 def _looks_fabricated(text: str, tool_calls_made: bool) -> bool:
@@ -137,7 +139,7 @@ def _looks_fabricated(text: str, tool_calls_made: bool) -> bool:
         return False
     for pat in _FAKE_PATTERNS:
         if pat.search(text):
-            logger.warning(f"[anti-fab] Pattern hit: {pat.pattern[:60]}")
+            logger.warning(f"[anti-fab] Hit: {pat.pattern[:50]}")
             return True
     return False
 
@@ -149,10 +151,10 @@ TOOLS = [
         "function": {
             "name": "terminal",
             "description": (
-                "Run ANY shell command inside the container. Returns real stdout + stderr. "
-                "Use for: web search, curl, git via push-commit utility, python3 scripts, "
-                "openclaude delegation, jcode swarm, file I/O, docker. "
-                "RULE: Call this first. Never write command output as text."
+                "Run ANY shell command. Returns real stdout + stderr. "
+                "MANDATORY for: web search (DDG/Brave), curl, git via push-commit, "
+                "python3, openclaude, jcode, file I/O, checking versions/stats. "
+                "Call this FIRST. Never write command output as text."
             ),
             "parameters": {
                 "type": "object",
@@ -168,7 +170,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "web_fetch",
-            "description": "Fetch URL via curl, return plain text (HTML stripped). Public APIs, raw GitHub files, RSS.",
+            "description": "curl + HTML strip. Public APIs, raw GitHub files, RSS.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -183,7 +185,7 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "camofox_browse",
-            "description": "Headless Chromium stealth browser. Use for JS SPAs, Cloudflare, LinkedIn, YouTube.",
+            "description": "Headless Chromium stealth browser. JS SPAs, Cloudflare, LinkedIn, YouTube.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -215,15 +217,16 @@ def _fix_python_c_quotes(cmd: str) -> str:
     return pre + "'" + script.replace("'", "'\\''") + "'" + remainder
 
 
+# FIX-E: Intercept bare git push → push-commit utility
 def _intercept_bare_git_push(cmd: str) -> str:
-    """FIX-E: Redirect bare git push → push-commit utility."""
     if re.search(r'\bgit\s+push\b', cmd) and 'push-commit' not in cmd and 'push_commit' not in cmd:
         logger.warning(f"[intercept] Bare git push → redirecting: {cmd[:80]}")
         return (
-            "echo '[HERMES] Bare git push has no credentials. Use push-commit utility:' && "
+            "echo '[HERMES ERROR] Bare git push has no credentials in this container.' && "
+            "echo 'Use push-commit utility:' && "
             "echo 'python3 /app/bot/telegram_bot.py push-commit "
             "--repo https://github.com/OWNER/REPO "
-            "--token $GITHUB_PAT --workdir DIR --message MSG'"
+            "--token $GITHUB_PAT --workdir /tmp/repos/DIR --message MSG'"
         )
     return cmd
 
@@ -324,7 +327,7 @@ async def _execute_tool(name: str, args: dict) -> str:
     return f"[gateway] Unknown tool: {name}"
 
 
-# ── File delivery ─────────────────────────────────────────────────────────────
+# ── FIX-D: File delivery ──────────────────────────────────────────────────────
 _FILE_TAG_RE = re.compile(r"%%FILE:(?P<name>[^\n%]+?)%%\s*\n(?P<content>.*?)%%/FILE%%", re.DOTALL)
 
 async def _send_file_attachment(bot, chat_id: int, filename: str, content: str) -> None:
@@ -367,19 +370,19 @@ def _ensure_db() -> None:
     con = sqlite3.connect(_DB_PATH)
     con.executescript("""
         CREATE TABLE IF NOT EXISTS sessions (
-            user_id INTEGER PRIMARY KEY,
-            history TEXT,
+            user_id    INTEGER PRIMARY KEY,
+            history    TEXT,
             updated_at TEXT
         );
         CREATE TABLE IF NOT EXISTS user_profiles (
-            user_id INTEGER PRIMARY KEY,
-            display_name TEXT,
-            telegram_username TEXT,
-            telegram_first_name TEXT,
-            first_seen TEXT,
-            last_seen TEXT,
-            last_task TEXT DEFAULT '',
-            notes TEXT DEFAULT ''
+            user_id              INTEGER PRIMARY KEY,
+            display_name         TEXT DEFAULT '',
+            telegram_username    TEXT DEFAULT '',
+            telegram_first_name  TEXT DEFAULT '',
+            first_seen           TEXT DEFAULT '',
+            last_seen            TEXT DEFAULT '',
+            last_task            TEXT DEFAULT '',
+            notes                TEXT DEFAULT ''
         );
     """)
     con.commit()
@@ -393,7 +396,7 @@ def _load_history(user_id: int) -> list[dict]:
         con.close()
         return json.loads(row[0]) if row else []
     except Exception as exc:
-        logger.warning(f"[memory] Load failed {user_id}: {exc}")
+        logger.warning(f"[db] Load history failed {user_id}: {exc}")
         return []
 
 def _save_history(user_id: int, history: list[dict]) -> None:
@@ -407,13 +410,13 @@ def _save_history(user_id: int, history: list[dict]) -> None:
         con.commit()
         con.close()
     except Exception as exc:
-        logger.warning(f"[memory] Save failed {user_id}: {exc}")
+        logger.warning(f"[db] Save history failed {user_id}: {exc}")
 
 def _trim(history: list[dict]) -> list[dict]:
     return history[-MAX_HISTORY:] if len(history) > MAX_HISTORY else history
 
 
-# ── FIX-C: User profile ───────────────────────────────────────────────────────
+# ── FIX-C: User profile (never cleared by /reset) ────────────────────────────
 def _load_profile(user_id: int) -> dict:
     try:
         _ensure_db()
@@ -447,30 +450,37 @@ def _upsert_profile(user_id: int, **kwargs) -> None:
         if exists:
             con.execute(
                 "UPDATE user_profiles SET "
-                "display_name=COALESCE(?,display_name), "
-                "telegram_username=COALESCE(?,telegram_username), "
-                "telegram_first_name=COALESCE(?,telegram_first_name), "
+                "display_name=COALESCE(NULLIF(?,display_name),display_name,?), "
+                "telegram_username=COALESCE(NULLIF(?,telegram_username),telegram_username,?), "
+                "telegram_first_name=COALESCE(NULLIF(?,telegram_first_name),telegram_first_name,?), "
                 "last_seen=?, "
-                "last_task=COALESCE(?,last_task), "
-                "notes=COALESCE(?,notes) "
+                "last_task=COALESCE(NULLIF(?,last_task),last_task,?), "
+                "notes=COALESCE(NULLIF(?,notes),notes,?) "
                 "WHERE user_id=?",
-                (kwargs.get("display_name"), kwargs.get("telegram_username"),
-                 kwargs.get("telegram_first_name"), ts,
-                 kwargs.get("last_task"), kwargs.get("notes"), user_id),
+                (
+                    kwargs.get("display_name"), kwargs.get("display_name", ""),
+                    kwargs.get("telegram_username"), kwargs.get("telegram_username", ""),
+                    kwargs.get("telegram_first_name"), kwargs.get("telegram_first_name", ""),
+                    ts,
+                    kwargs.get("last_task"), kwargs.get("last_task", ""),
+                    kwargs.get("notes"), kwargs.get("notes", ""),
+                    user_id,
+                ),
             )
         else:
             con.execute(
                 "INSERT INTO user_profiles "
                 "(user_id, display_name, telegram_username, telegram_first_name, "
-                "first_seen, last_seen, last_task, notes) "
-                "VALUES (?,?,?,?,?,?,?,?)",
-                (user_id,
-                 kwargs.get("display_name", ""),
-                 kwargs.get("telegram_username", ""),
-                 kwargs.get("telegram_first_name", ""),
-                 ts, ts,
-                 kwargs.get("last_task", ""),
-                 kwargs.get("notes", "")),
+                "first_seen, last_seen, last_task, notes) VALUES (?,?,?,?,?,?,?,?)",
+                (
+                    user_id,
+                    kwargs.get("display_name", ""),
+                    kwargs.get("telegram_username", ""),
+                    kwargs.get("telegram_first_name", ""),
+                    ts, ts,
+                    kwargs.get("last_task", ""),
+                    kwargs.get("notes", ""),
+                ),
             )
         con.commit()
         con.close()
@@ -489,7 +499,7 @@ def _sync_profile_from_telegram(update: Update) -> None:
     )
 
 
-# ── JARVIS-1: Memory file auto-reader ────────────────────────────────────────
+# ── JARVIS-1: Memory auto-injection ──────────────────────────────────────────
 _MEMORY_PATHS = [
     Path(HERMES_HOME) / "memories" / "MEMORY.md",
     Path("/app/hermes_config/memories/MEMORY.md"),
@@ -501,30 +511,21 @@ def _memory_file_path() -> Path:
     return p
 
 def _read_memory_for_context(max_chars: int = 3000) -> str:
-    """
-    JARVIS-1: Read MEMORY.md and return the most recent entries.
-    This is called on every request and injected into the system prompt.
-    The model does NOT need to go fetch memory — it's always already there.
-    """
+    """Read MEMORY.md tail — injected into every system prompt automatically."""
     for p in _MEMORY_PATHS:
         if p.exists():
             content = p.read_text(encoding="utf-8").strip()
             if not content:
                 return ""
-            # Return the tail — most recent entries are at the bottom
             if len(content) > max_chars:
                 return "(... earlier entries omitted ...)\n\n" + content[-max_chars:]
             return content
     return ""
 
-def _auto_write_memory(task_summary: str) -> None:
-    """
-    JARVIS-4: Automatically write a memory entry after every successful task.
-    Called by handle_message after agent_loop completes.
-    The model doesn't choose to remember — the system forces it.
-    """
+# JARVIS-4: Auto-write memory after every completed task
+def _auto_write_memory(user_msg: str, reply: str) -> None:
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    entry = f"\n## {ts}\n{task_summary.strip()}\n"
+    entry = f"\n## {ts}\nTask: {user_msg.strip()[:120]}\nResult: {reply.strip()[:200]}\n"
     p = _memory_file_path()
     try:
         if not p.exists():
@@ -535,45 +536,29 @@ def _auto_write_memory(task_summary: str) -> None:
     except Exception as exc:
         logger.warning(f"[memory] Auto-write failed: {exc}")
 
-def _extract_task_summary(user_msg: str, reply: str) -> str:
-    """Create a one-line memory entry from a completed task."""
-    # Trim both to fit
-    q = user_msg.strip()[:120]
-    a = reply.strip()[:200]
-    return f"Task: {q}\nResult: {a}"
-
 
 # ── JARVIS-3: Session-start briefing ─────────────────────────────────────────
-def _is_fresh_session(history: list[dict]) -> bool:
-    """True if this is the first message of a session (empty history)."""
-    return len(history) == 0
-
 def _build_briefing_block() -> str:
-    """
-    JARVIS-3: Build a real-time status block for session start.
-    Injected once at the top of the first message of each session.
-    """
     checks = [
-        ("git_log", "git -C /app log --oneline -5 2>/dev/null || echo '(no git)'"),
-        ("services", "supervisorctl status 2>/dev/null | head -10 || echo '(no supervisor)'"),
-        ("disk",     "df -h / 2>/dev/null | tail -1"),
-        ("memory_recent", "tail -20 /data/.hermes/memories/MEMORY.md 2>/dev/null || echo '(no memory file)'"),
+        ("git_log",    "git -C /app log --oneline -5 2>/dev/null || echo '(no git log)'"),
+        ("services",   "supervisorctl status 2>/dev/null | head -8 || echo '(no supervisor)'"),
+        ("disk",       "df -h / 2>/dev/null | tail -1"),
+        ("memory_tail","tail -15 /data/.hermes/memories/MEMORY.md 2>/dev/null || echo '(no memory file yet)'"),
     ]
-    lines = ["[SESSION START BRIEFING]"]
+    lines = ["[SESSION START — REAL ENVIRONMENT STATUS]"]
     for label, cmd in checks:
         try:
-            result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True,
-                timeout=5, executable="/bin/bash"
-            )
+            result = subprocess.run(cmd, shell=True, capture_output=True, text=True,
+                                    timeout=5, executable="/bin/bash")
             out = ((result.stdout or "") + (result.stderr or "")).strip()
             lines.append(f"{label}: {out[:300]}")
         except Exception as exc:
             lines.append(f"{label}: (error: {exc})")
+    lines.append("[END STATUS]")
     return "\n".join(lines)
 
 
-# ── System prompt builder ─────────────────────────────────────────────────────
+# ── System prompt ─────────────────────────────────────────────────────────────
 _SOUL_PATHS = [Path(HERMES_HOME) / "SOUL.md", Path("/app/hermes_config/SOUL.md")]
 
 def _load_soul() -> str:
@@ -582,60 +567,78 @@ def _load_soul() -> str:
             return p.read_text()
     return "You are Hermes, Rhodawk AI intelligence. Execute first, report after."
 
+
+# FIX-G: Correct Brave API URL | FIX-H: DDG fallback instruction
 _RUNTIME_BLOCK = """
 
 ═══════════════════════════════════════════════════════
-HERMES RUNTIME — INJECTED AUTOMATICALLY — DO NOT IGNORE
+HERMES RUNTIME v7.0 — READ BEFORE EVERY RESPONSE
 ═══════════════════════════════════════════════════════
 
-UTC NOW:          {utc_ts}
-OPERATOR NAME:    {operator_name}
-TELEGRAM:         {telegram_username}
-FIRST SEEN:       {first_seen}
-OPERATOR NOTES:   {operator_notes}
-LAST TASK:        {last_task}
-MODEL:            {model}
-CAMOFOX:          http://{camofox_host}:{camofox_port}
-GITHUB PAT:       {github_pat_status}
-BRAVE SEARCH:     {brave_status}
+UTC NOW:       {utc_ts}
+OPERATOR:      {operator_name}
+TELEGRAM:      {telegram_username}
+FIRST SEEN:    {first_seen}
+NOTES:         {operator_notes}
+LAST TASK:     {last_task}
+MODEL:         {model}
+GITHUB PAT:    {github_pat_status}
+BRAVE SEARCH:  {brave_status}
 
-──── LONG-TERM MEMORY (auto-injected, always current) ────
+──── LONG-TERM MEMORY (auto-loaded every session) ────
 {memory_block}
 ──── END MEMORY ────
 
-──── SESSION STATUS ────
+──── ENVIRONMENT STATUS ────
 {briefing_block}
 ──── END STATUS ────
 
-══════════════════════════════════════════
-TOOLS AVAILABLE (call these, do not narrate):
+══════════════════════════════════════════════════════
+TOOLS — call these, never narrate them:
   terminal       — real bash. Use for EVERYTHING executable.
   web_fetch      — curl + HTML strip. Public APIs, raw files.
   camofox_browse — headless Chromium. JS sites, Cloudflare.
 
-SEARCH (MUST call terminal — NEVER write results from memory):
-  python3 -c '
+WEB SEARCH — ALWAYS call terminal first. NEVER write results from memory:
+
+  DDG (default, no API key needed):
+    python3 -c '
 from duckduckgo_search import DDGS
-results = DDGS().text("QUERY HERE", max_results=5)
-for r in results:
+for r in DDGS().text("QUERY HERE", max_results=5):
     print(r["title"]); print(r["href"]); print(r["body"][:300]); print()
 '
 
-  With BRAVE_API_KEY:
-  curl -s "https://api.search.brave.com/res/v1/web/search?q=QUERY&count=5" \\
-    -H "Accept: application/json" -H "X-Subscription-Token: $BRAVE_API_KEY" | \\
-    jq -r '.web.results[] | "\\(.title)\\n\\(.url)\\n\\(.description)\\n"'
+  Brave (when BRAVE_API_KEY is set):
+    curl -s "https://api.search.brave.com/res/v1/web/search?q=QUERY&count=5" \
+      -H "Accept: application/json" \
+      -H "X-Subscription-Token: $BRAVE_API_KEY" | \
+      jq -r '.web.results[] | "\(.title)\n\(.url)\n\(.description)\n"'
 
-FILE DELIVERY (MUST use this format — NEVER send file content as prose):
+  IMPORTANT: If Brave returns error or empty, immediately retry with DDG.
+  NEVER say "search unavailable". Always try DDG as fallback.
+
+VERSION CHECKS — always call terminal, never write from memory:
+  python3 --version && pip show openai | grep Version
+
+API LISTS — always call terminal:
+  curl -s "$DO_INFERENCE_BASE_URL/models" \
+    -H "Authorization: Bearer $DO_INFERENCE_API_KEY" | jq -r '.data[].id'
+
+FILE DELIVERY — use %%FILE:%% tags. NEVER say "I've attached" or "here it is:":
   %%FILE:filename.ext%%
-  complete file content here — not truncated
+  complete file content here
+  %%/FILE%%
+  Example:
+  %%FILE:.env.example%%
+  PORT=8000
+  DATABASE_URL=postgresql://user:pass@localhost/db
   %%/FILE%%
 
-GIT PUSH (MUST use push-commit — NEVER bare git push, no credentials in shell):
-  python3 /app/bot/telegram_bot.py push-commit \\
-    --repo https://github.com/Architect8989/Hermes88 \\
-    --token $GITHUB_PAT \\
-    --workdir /tmp/repos/REPONAME \\
+GIT PUSH — use push-commit utility. NEVER bare git push (no credentials):
+  python3 /app/bot/telegram_bot.py push-commit \
+    --repo https://github.com/Architect8989/Hermes88 \
+    --token $GITHUB_PAT \
+    --workdir /tmp/repos/REPONAME \
     --message "feat: description"
 
 SUB-AGENTS:
@@ -643,47 +646,39 @@ SUB-AGENTS:
   jcode:      OPENAI_BASE_URL=$DO_INFERENCE_BASE_URL OPENAI_API_KEY=$DO_INFERENCE_API_KEY jcode run --message "..."
   health:     python3 /app/bot/telegram_bot.py health-check
 
-ABSOLUTE RULES (breaking any = Jarvis failure):
+ABSOLUTE RULES — breaking any = Jarvis failure:
   1. TOOLS BEFORE TEXT. For any data/action query: call terminal first.
-  2. ZERO FABRICATION. Never write search results, stats, or file content without a tool call.
-  3. FILE TAG. Any file you produce goes in %%FILE:%% tags. Period.
-  4. PUSH-COMMIT. Never bare git push. Always push-commit utility.
-  5. NUMBERS from tool output only. Copy verbatim. No rounding, no approximation.
-  6. DATE = timestamp above. Not your training data.
-  7. ADDRESS OPERATOR BY NAME. You know who they are. Use it.
-══════════════════════════════════════════
+  2. ZERO FABRICATION. Search results, versions, stats, file content = tool call required.
+  3. FILE TAG. Any file goes in %%FILE:%% tags. "Here it is:" with inline text = FAILURE.
+  4. PUSH-COMMIT. Never bare git push. Always push-commit.
+  5. NUMBERS from tool output only. Verbatim. No rounding.
+  6. DATE = UTC timestamp above. Not training data.
+  7. ADDRESS OPERATOR BY NAME. Use "{operator_name}" naturally.
+  8. DDG FALLBACK. If any search/API fails, retry with DDG immediately.
+══════════════════════════════════════════════════════
 """
 
-
 def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = False) -> str:
-    utc_ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    operator_name    = "Operator"
+    utc_ts         = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    operator_name  = "Operator"
     telegram_username = "unknown"
-    first_seen       = "unknown"
-    operator_notes   = "(none)"
-    last_task        = "(none)"
+    first_seen     = "unknown"
+    operator_notes = "(none)"
+    last_task      = "(none — first session)"
 
     if user_id:
         profile = _load_profile(user_id)
         if profile:
             operator_name     = (profile.get("display_name")
-                                 or profile.get("telegram_first_name")
-                                 or "Operator")
-            tg_user           = profile.get("telegram_username", "")
-            telegram_username = f"@{tg_user}" if tg_user else "unknown"
+                                 or profile.get("telegram_first_name") or "Operator")
+            tg               = profile.get("telegram_username", "")
+            telegram_username = f"@{tg}" if tg else "unknown"
             first_seen        = profile.get("first_seen", "unknown")
             operator_notes    = profile.get("notes") or "(none)"
-            last_task         = profile.get("last_task") or "(none — first session)"
+            last_task         = profile.get("last_task") or "(none)"
 
-    # JARVIS-1: Inject memory automatically
-    memory_block = _read_memory_for_context(3000) or "(empty — no entries yet)"
-
-    # JARVIS-3: Session briefing only on fresh sessions (no history)
-    if is_fresh_session:
-        briefing_block = _build_briefing_block()
-    else:
-        briefing_block = "(mid-session — full briefing already provided at session start)"
+    memory_block   = _read_memory_for_context(3000) or "(empty — no entries yet)"
+    briefing_block = _build_briefing_block() if is_fresh_session else "(mid-session)"
 
     runtime = _RUNTIME_BLOCK.format(
         utc_ts=utc_ts,
@@ -693,10 +688,8 @@ def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = Fa
         operator_notes=operator_notes,
         last_task=last_task,
         model=MODEL,
-        camofox_host=CAMOFOX_HOST,
-        camofox_port=CAMOFOX_PORT,
-        github_pat_status="SET (use $GITHUB_PAT)" if GITHUB_PAT else "NOT SET — pushes will fail",
-        brave_status="SET (use $BRAVE_API_KEY)" if BRAVE_API_KEY else "NOT SET — use DDG fallback",
+        github_pat_status="SET" if GITHUB_PAT else "NOT SET — pushes will fail",
+        brave_status="SET — use Brave first, DDG fallback" if BRAVE_API_KEY else "NOT SET — use DDG only",
         memory_block=memory_block,
         briefing_block=briefing_block,
     )
@@ -708,22 +701,56 @@ def _build_system_prompt(user_id: int | None = None, is_fresh_session: bool = Fa
 openai_client = AsyncOpenAI(api_key=API_KEY, base_url=BASE_URL)
 
 
-# ── Scratchpad fallback ───────────────────────────────────────────────────────
-_BASH_BLOCK_RE = re.compile(r"```(?:bash|shell|sh|terminal|cmd|console|python3?)?\n(.*?)```", re.DOTALL | re.IGNORECASE)
-_INLINE_CMD_RE = re.compile(r"^(?:Running|Executing|Command):\s*(.+)$", re.MULTILINE)
+# ── FIX-F: Hardened scratchpad extraction ────────────────────────────────────
+# Patterns that indicate a real shell command (not hex hashes or prose)
+_CMD_START_RE = re.compile(
+    r"^("
+    r"python3?|pip3?|node|npm|npx|bun|curl|wget|git|jq|cat|ls|cd|mkdir|rm|cp|mv|"
+    r"echo|printf|export|env|source|bash|sh|exec|sudo|apt|apt-get|"
+    r"docker|supervisorctl|systemctl|ps|kill|pgrep|pkill|"
+    r"find|grep|awk|sed|sort|head|tail|wc|tee|"
+    r"tar|zip|unzip|gzip|"
+    r"./|/usr/|/bin/|/app/|/tmp/|/data/"
+    r")",
+    re.IGNORECASE,
+)
+_HEX_ONLY_RE = re.compile(r"^[0-9a-f]{20,}$", re.IGNORECASE)
+_BASH_BLOCK_RE = re.compile(
+    r"```(?:bash|shell|sh|terminal|cmd|console|python3?)?\n(.*?)```",
+    re.DOTALL | re.IGNORECASE
+)
+_INLINE_CMD_RE = re.compile(
+    r"^(?:Running|Executing|Command|Run|Execute):\s*(.+)$", re.MULTILINE
+)
 
 def _extract_scratchpad_commands(text: str) -> list[str]:
+    """
+    FIX-F: Extract real shell commands from model text.
+    Filters out: hex strings, prose, markdown headers, plain text.
+    """
     cmds: list[str] = []
+
+    # 1. Fenced code blocks first (most reliable)
     for m in _BASH_BLOCK_RE.finditer(text):
         block = m.group(1).strip()
-        if block:
+        if not block:
+            continue
+        # Validate: first line must look like a real command
+        first_line = block.split("\n")[0].strip()
+        if _CMD_START_RE.match(first_line) and not _HEX_ONLY_RE.match(first_line):
             cmds.append(block)
-    if not cmds:
-        for m in _INLINE_CMD_RE.finditer(text):
-            cmd = m.group(1).strip()
-            if cmd:
-                cmds.append(cmd)
+
+    if cmds:
+        return cmds[:5]
+
+    # 2. "Running: ..." / "Executing: ..." inline patterns
+    for m in _INLINE_CMD_RE.finditer(text):
+        cmd = m.group(1).strip()
+        if _CMD_START_RE.match(cmd) and not _HEX_ONLY_RE.match(cmd):
+            cmds.append(cmd)
+
     return cmds[:5]
+
 
 async def _execute_text_scratchpad(content: str, messages: list[dict], update: Update) -> bool:
     cmds = _extract_scratchpad_commands(content)
@@ -750,10 +777,10 @@ async def _execute_text_scratchpad(content: str, messages: list[dict], update: U
     messages.append({
         "role": "user",
         "content": (
-            "SYSTEM NOTE: commands executed for real. Actual outputs:\n\n"
+            "SYSTEM: commands executed for real. Actual outputs:\n\n"
             + "\n---\n".join(executed_pairs)
-            + "\n\nFINAL ANSWER RULE: Use ONLY exact values from the outputs above. "
-            "Copy numbers verbatim. State the result from the output."
+            + "\n\nFINAL ANSWER RULE: Copy numbers and facts verbatim from the outputs above. "
+            "Do not add, round, or paraphrase any value that came from a tool."
         ),
     })
     return True
@@ -769,26 +796,21 @@ def _verify_numbers(tool_results: list[str], final_answer: str) -> bool:
         result_nums |= set(re.findall(r'\b\d{5,}\b', r))
     fabricated = answer_nums - result_nums
     if fabricated:
-        logger.warning(f"[verify] Fabricated numbers not in tool output: {fabricated}")
+        logger.warning(f"[verify] Fabricated numbers: {fabricated}")
         return False
     return True
 
 
-# ── JARVIS-5: Agentic loop with enforced tool rounds ─────────────────────────
-async def _agent_loop(
-    messages: list[dict],
-    update: Update,
-    user_msg: str,
-) -> str:
+# ── JARVIS-5: Agentic loop ────────────────────────────────────────────────────
+async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> str:
     scratchpad_used   = False
     all_tool_results: list[str] = []
     tool_calls_ever   = False
-    is_data_query     = _is_data_query(user_msg)
-    # JARVIS-5: keep tool_choice="required" for first 2 rounds on data queries
-    forced_rounds     = 2 if is_data_query else 0
+    is_data           = _is_data_query(user_msg)
+    forced_rounds     = 2 if is_data else 0
 
-    if is_data_query:
-        logger.info(f"[anti-fab] Data query — tool_choice=required for first {forced_rounds} rounds")
+    if is_data:
+        logger.info(f"[anti-fab] Data query — tool_choice=required x{forced_rounds} rounds")
 
     for _round in range(MAX_TOOL_ROUNDS):
         tool_choice = "required" if _round < forced_rounds else "auto"
@@ -801,42 +823,43 @@ async def _agent_loop(
             max_tokens=4096,
             temperature=0.05,
         )
-        choice = resp.choices[0]
-        msg    = choice.message
+        choice  = resp.choices[0]
+        msg     = choice.message
         content = msg.content or ""
 
-        # ── No tool calls in this round ──────────────────────────────────────
+        # ── No tool calls ────────────────────────────────────────────────────
         if not msg.tool_calls:
-            # FIX-B: Anti-fabrication check
+            # FIX-A: Anti-fabrication check
             if _looks_fabricated(content, tool_calls_ever):
-                logger.warning("[anti-fab] Fabricated response detected — forcing tool retry")
+                logger.warning("[anti-fab] Fabricated response — forcing tool retry")
                 messages.append({"role": "assistant", "content": content})
                 messages.append({
                     "role": "user",
                     "content": (
-                        "STOP. That response was fabricated — you wrote search results, "
-                        "statistics, or file content without calling any tool. "
-                        "This is a Jarvis failure. Call the terminal tool NOW with a real command. "
-                        "Do not write any more text until you have seen actual tool output."
+                        "STOP. That response is fabricated — you wrote search results, "
+                        "statistics, versions, or file content without calling any tool. "
+                        "This violates the ZERO FABRICATION rule. "
+                        "Call terminal NOW with a real command. "
+                        "Do not write any more text until you have seen real tool output."
                     ),
                 })
-                forced_rounds = _round + 2  # extend forced tool rounds
+                forced_rounds = _round + 2
                 continue
 
-            # Scratchpad fallback
+            # FIX-F: Scratchpad fallback (hardened extraction)
             if not scratchpad_used:
                 executed = await _execute_text_scratchpad(content, messages, update)
                 if executed:
                     scratchpad_used = True
                     continue
 
-            # Numeric consistency
+            # Numeric consistency check
             if all_tool_results and content and not _verify_numbers(all_tool_results, content):
                 messages.append({"role": "assistant", "content": content})
                 messages.append({
                     "role": "user",
                     "content": (
-                        "Your answer contains numbers not present in the tool output. "
+                        "Your answer contains numbers not in the tool output. "
                         "Re-read the outputs and restate with exact verbatim values only."
                     ),
                 })
@@ -845,9 +868,10 @@ async def _agent_loop(
 
             return content
 
-        # ── Tool calls made ──────────────────────────────────────────────────
+        # ── Tool calls ───────────────────────────────────────────────────────
         scratchpad_used = False
         tool_calls_ever = True
+        forced_rounds   = max(forced_rounds, 0)
 
         messages.append({
             "role": "assistant",
@@ -887,6 +911,21 @@ async def _agent_loop(
             logger.info(f"[tool:{fn_name}] {len(result)} chars")
             all_tool_results.append(result)
 
+            # FIX-H: Auto-inject DDG fallback if search failed
+            ddg_hint = ""
+            if fn_name == "terminal" and (
+                "error" in result.lower()[:100] or
+                "exit 1" in result[:20] or
+                "traceback" in result.lower()[:200]
+            ) and "search" in fn_args.get("command", "").lower():
+                ddg_hint = (
+                    "\n\n[SYSTEM] Search command failed. "
+                    "Retry immediately with DDG:\n"
+                    "python3 -c \"\nfrom duckduckgo_search import DDGS\n"
+                    "for r in DDGS().text('QUERY', max_results=5):\n"
+                    "    print(r['title']); print(r['href']); print(r['body'][:300]); print()\n\""
+                )
+
             preview = result.strip()[:500]
             if preview:
                 await asyncio.sleep(0.3)
@@ -900,7 +939,7 @@ async def _agent_loop(
             messages.append({
                 "role": "tool",
                 "tool_call_id": tc.id,
-                "content": result,
+                "content": result + ddg_hint,
             })
 
     return "[hermes] Max tool rounds reached."
@@ -941,11 +980,10 @@ async def cmd_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             or update.effective_user.first_name or "Operator")
     ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     await update.message.reply_text(
-        f"Hermes online. Good to see you, {name}.\n"
+        f"Hermes v7.0 online. Good to see you, {name}.\n"
         f"UTC: {ts}\n"
         f"Model: {MODEL}\n"
-        f"Memory: auto-injected every message\n"
-        f"Tools: terminal | web_fetch | camofox_browse\n"
+        f"Memory: auto-injected every session\n"
         "Commands: /reset /status /memory /profile /help"
     )
 
@@ -959,7 +997,7 @@ async def cmd_reset(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     name = profile.get("display_name") or profile.get("telegram_first_name") or "Operator"
     await update.message.reply_text(
         f"Conversation cleared, {name}.\n"
-        "Your profile and long-term memory are intact — Hermes still knows who you are."
+        "Profile and long-term memory are intact."
     )
 
 
@@ -967,18 +1005,18 @@ async def cmd_help(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not _is_allowed(update.effective_chat.id):
         return
     await update.message.reply_text(
-        "Hermes v6.0 — Rhodawk AI\n\n"
-        "/start              — Status\n"
-        "/reset              — Clear conversation (profile + memory kept)\n"
-        "/status             — Stack health check\n"
-        "/memory             — Read long-term memory\n"
-        "/memory <note>      — Append note to memory\n"
-        "/memory clear       — Wipe memory\n"
-        "/profile            — View your operator profile\n"
-        "/profile name <x>   — Set display name\n"
-        "/profile notes <x>  — Set context notes for Hermes\n"
-        "/help               — This message\n\n"
-        f"Model: {MODEL}\nEndpoint: {BASE_URL}"
+        "Hermes v7.0 — Rhodawk AI\n\n"
+        "/start             — Status + UTC time\n"
+        "/reset             — Clear conversation (profile + memory kept)\n"
+        "/status            — Stack health check\n"
+        "/memory            — Read long-term memory\n"
+        "/memory <note>     — Append note\n"
+        "/memory clear      — Wipe memory\n"
+        "/profile           — View operator profile\n"
+        "/profile name <x>  — Set display name\n"
+        "/profile notes <x> — Set context notes\n"
+        "/help              — This message\n\n"
+        f"Model: {MODEL}"
     )
 
 
@@ -1025,7 +1063,7 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
     if not args_text:
         profile = _load_profile(user_id)
         if not profile:
-            await update.message.reply_text("No profile yet — send any message to create it.")
+            await update.message.reply_text("No profile yet. Send any message to create it.")
             return
         await update.message.reply_text(
             f"Name: {profile.get('display_name') or '(not set)'}\n"
@@ -1049,12 +1087,12 @@ async def cmd_profile(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None:
             _upsert_profile(user_id, notes=notes)
             await update.message.reply_text("Profile notes updated.")
         else:
-            await update.message.reply_text("Usage: /profile notes <context for Hermes>")
+            await update.message.reply_text("Usage: /profile notes <context>")
     else:
         await update.message.reply_text(
             "/profile           — view\n"
             "/profile name <x>  — set name\n"
-            "/profile notes <x> — set context notes"
+            "/profile notes <x> — set notes"
         )
 
 
@@ -1068,19 +1106,18 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
     user_id  = update.effective_user.id
     user_msg = update.message.text.strip()
 
-    # FIX-C + JARVIS-2: sync Telegram identity, update last_seen
+    # Sync Telegram identity + update last_seen on every message
     _sync_profile_from_telegram(update)
-    _upsert_profile(user_id)
 
     await update.message.chat.send_action(ChatAction.TYPING)
 
     history       = _load_history(user_id)
-    fresh_session = _is_fresh_session(history)
+    fresh_session = (len(history) == 0)
 
     history.append({"role": "user", "content": user_msg})
     history = _trim(history)
 
-    # JARVIS-1+2+3: build system prompt with memory + profile + briefing injected
+    # JARVIS-1+2+3: system prompt with memory + profile + briefing
     system_prompt = _build_system_prompt(user_id, is_fresh_session=fresh_session)
     messages = [{"role": "system", "content": system_prompt}] + list(history)
 
@@ -1089,11 +1126,9 @@ async def handle_message(update: Update, ctx: ContextTypes.DEFAULT_TYPE) -> None
         history.append({"role": "assistant", "content": reply})
         _save_history(user_id, _trim(history))
 
-        # JARVIS-4: Auto-write memory after every task (non-trivial messages only)
+        # JARVIS-4: Auto-write memory after every non-trivial exchange
         if len(user_msg) > 15 and len(reply) > 20:
-            summary = _extract_task_summary(user_msg, reply)
-            _auto_write_memory(summary)
-            # Update last_task in profile
+            _auto_write_memory(user_msg, reply)
             _upsert_profile(user_id, last_task=user_msg.strip()[:200])
 
         await _deliver_reply(update, reply)
@@ -1114,18 +1149,19 @@ def main() -> None:
 
     try:
         _ensure_db()
-        logger.info(f"[gateway] SQLite DB: {_DB_PATH}")
+        logger.info(f"[gateway] SQLite: {_DB_PATH}")
     except Exception as exc:
         logger.warning(f"[gateway] DB init failed: {exc}")
 
-    logger.info(f"[gateway] Model      : {MODEL}")
-    logger.info(f"[gateway] Memory     : auto-injected from {_MEMORY_PATHS[0]}")
-    logger.info(f"[gateway] Profile    : persistent user_profiles table")
-    logger.info(f"[gateway] Anti-fab   : tool_choice=required for first 2 rounds on data queries")
-    logger.info(f"[gateway] Search     : {'Brave + DDG fallback' if BRAVE_API_KEY else 'DuckDuckGo only'}")
-    logger.info(f"[gateway] Git push   : {'GITHUB_PAT set' if GITHUB_PAT else 'GITHUB_PAT NOT SET'}")
+    logger.info(f"[gateway] Hermes v7.0 — Jarvis Architecture")
+    logger.info(f"[gateway] Model     : {MODEL}")
+    logger.info(f"[gateway] Memory    : auto-injected from {_MEMORY_PATHS[0]}")
+    logger.info(f"[gateway] Anti-fab  : tool_choice=required x2 on data queries")
+    logger.info(f"[gateway] Scratchpad: hardened extraction (FIX-F)")
+    logger.info(f"[gateway] Search    : {'Brave+DDG' if BRAVE_API_KEY else 'DDG only'}")
+    logger.info(f"[gateway] Git push  : {'GITHUB_PAT set' if GITHUB_PAT else 'GITHUB_PAT MISSING'}")
     if ALLOWED_CHAT_IDS:
-        logger.info(f"[gateway] Whitelist  : {ALLOWED_CHAT_IDS}")
+        logger.info(f"[gateway] Whitelist : {ALLOWED_CHAT_IDS}")
 
     app = Application.builder().token(TELEGRAM_TOKEN).build()
     app.add_handler(CommandHandler("start",   cmd_start))
