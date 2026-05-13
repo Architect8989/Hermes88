@@ -1,0 +1,54 @@
+# Dockerfile.sandbox-manager
+# Multi-stage build for the Rhodawk AI Sandbox Manager (Go)
+#
+# Produces a minimal static binary with no runtime dependencies.
+# The final image uses scratch (empty filesystem) for the smallest
+# possible attack surface - no shell, no utilities, no package manager.
+#
+# Build: docker build -f Dockerfile.sandbox-manager -t rhodawk-sandbox-manager:latest .
+# Run:   docker run -p 8081:8081 -v /var/run/docker.sock:/var/run/docker.sock rhodawk-sandbox-manager:latest
+
+# ============================================================
+# Stage 1: Build the Go binary
+# ============================================================
+FROM golang:1.21-alpine AS builder
+
+# Install git for module downloads and ca-certificates for HTTPS.
+RUN apk add --no-cache git ca-certificates tzdata
+
+WORKDIR /build
+
+# Copy module files first for Docker layer caching.
+COPY sandbox/go.mod sandbox/go.sum ./
+RUN go mod download
+
+# Copy source code.
+COPY sandbox/*.go ./
+
+# Build a fully static binary with CGO disabled.
+# -ldflags="-s -w" strips debug info for smaller binary.
+# CGO_ENABLED=0 ensures no dynamic linking to libc.
+RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
+    -ldflags="-s -w -X main.version=$(date +%Y%m%d)" \
+    -o /sandbox-manager .
+
+# ============================================================
+# Stage 2: Minimal runtime image
+# ============================================================
+FROM scratch
+
+# Import CA certificates for any HTTPS calls (e.g., Docker registry API).
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+
+# Import timezone data for proper time handling.
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+
+# Copy the compiled binary.
+COPY --from=builder /sandbox-manager /sandbox-manager
+
+# Document the exposed port.
+EXPOSE 8081
+
+# Run as the sandbox manager binary.
+# Note: Docker socket must be mounted for container management.
+ENTRYPOINT ["/sandbox-manager"]

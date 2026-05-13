@@ -1,0 +1,63 @@
+# Dockerfile.sandbox
+# Ephemeral execution container for the Rhodawk AI Sandbox Manager
+#
+# This image runs untrusted code submitted by users through the Hermes88 AI system.
+# It includes Python 3.11, common utilities, and security analysis tools.
+#
+# Security Design:
+# - Runs as non-root user 'sandbox' (UID 1000)
+# - No SUID/SGID binaries
+# - Minimal package set to reduce attack surface
+# - No package manager cache retained
+# - ENTRYPOINT is bash -c to execute arbitrary commands
+#
+# The sandbox manager creates containers from this image with additional
+# runtime restrictions: read-only rootfs, no network, memory/CPU/PID limits,
+# no-new-privileges, and timeout enforcement.
+#
+# Build: docker build -f Dockerfile.sandbox -t rhodawk-sandbox:latest .
+
+FROM python:3.11-slim
+
+# Install system utilities needed for code execution and analysis.
+# git: for cloning repos in code review tasks
+# curl: for API testing tasks
+# jq: for JSON processing
+# build-essential: for compiling C extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git \
+    curl \
+    jq \
+    build-essential \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Python security analysis tools.
+# bandit: Python static security analyzer
+# safety: checks dependencies for known vulnerabilities
+# semgrep: multi-language static analysis
+RUN pip install --no-cache-dir \
+    bandit \
+    safety \
+    semgrep \
+    && pip cache purge
+
+# Remove any SUID/SGID bits for defense in depth.
+RUN find / -perm /4000 -type f -exec chmod u-s {} + 2>/dev/null || true && \
+    find / -perm /2000 -type f -exec chmod g-s {} + 2>/dev/null || true
+
+# Create non-root user for sandbox execution.
+RUN useradd -m -s /bin/bash -u 1000 sandbox
+
+# Set ownership of workspace directory.
+RUN mkdir -p /home/sandbox/workspace && \
+    chown -R sandbox:sandbox /home/sandbox
+
+# Switch to non-root user.
+USER sandbox
+
+# Set working directory to the sandbox workspace.
+WORKDIR /home/sandbox/workspace
+
+# Entry point accepts commands via bash -c.
+# The sandbox manager passes the user's command as the first argument.
+ENTRYPOINT ["/bin/bash", "-c"]
