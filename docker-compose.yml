@@ -1,29 +1,17 @@
 # =============================================================================
-# Rhodawk AI — Hermes v8.0 (Jarvis-Grade CEO Assistant)
+# Rhodawk AI — Hermes v7.0 (CEO-Grade Second Brain)
 # docker compose deployment
-#
-# Changes v7 → v8:
-#   FIX-3  camofox: replaced live-clone command with proper built image.
-#          Previously: `node:20-slim` + apt-get + git clone + npm install on
-#          every start — unreliable and slow. Now: Dockerfile.camofox bakes
-#          everything at build time. Container start is instant.
 #
 # Deploy:
 #   cp .env.example .env && nano .env   # fill in all required secrets
 #   docker compose up -d --build
 #
 # Manage:
-#   docker compose logs -f              # stream all logs
-#   docker compose logs -f hermes       # gateway logs only
+#   docker compose logs -f              # stream logs
 #   docker compose ps                   # container status
-#   docker compose restart hermes       # restart bot only
-#   docker compose down                 # stop all
-#   docker compose up -d --build        # update after git pull
-#
-# FIX-6 NOTE: CAMOFOX_HOST must be "camofox" (the Docker service name).
-#   If you see "localhost:9377" in /status output your .env has
-#   CAMOFOX_HOST=localhost — remove that line. The correct value is
-#   CAMOFOX_HOST=camofox and is set below in the environment block.
+#   docker compose restart              # restart bot
+#   docker compose down                 # stop
+#   docker compose up -d --build       # update after git pull
 # =============================================================================
 
 services:
@@ -32,24 +20,22 @@ services:
       context: .
       dockerfile: Dockerfile.vps
     image: rhodawk-hermes:latest
+    pull_policy: never
     container_name: hermes
     env_file: .env
     environment:
-      # Model assignments
+      # Model assignments — override whatever init_and_start.sh sets so
+      # docker compose up -d (no rebuild) picks these up immediately.
       - HERMES_MODEL=deepseek-v4-pro
       - OPENCLAUDE_MODEL=deepseek-r1-distill-llama-70b
       - JCODE_MODEL=kimi-k2.6
-      # FIX-6: Camofox is a sibling container — NEVER localhost from inside hermes.
-      # This override wins over any CAMOFOX_HOST=localhost in your .env file.
+      # Camofox is a sibling container — never localhost from inside hermes
       - CAMOFOX_HOST=camofox
       - CAMOFOX_PORT=9377
     volumes:
       # Persists across restarts: SQLite memory DB, hermes config, sessions, logs
       - hermes-data:/data
     restart: unless-stopped
-    depends_on:
-      camofox:
-        condition: service_healthy
     healthcheck:
       test:
         - CMD
@@ -69,26 +55,21 @@ services:
         max-file: "5"
 
   camofox:
-    # FIX-3: Use pre-built image — no more live apt-get + git clone + npm install on start.
-    build:
-      context: .
-      dockerfile: Dockerfile.camofox
-    image: rhodawk-camofox:latest
+    image: node:20-slim
     container_name: camofox
+    working_dir: /app
+    command: >
+      bash -c "apt-get update -q && apt-get install -y -q git &&
+               git clone --depth 1 https://github.com/jo-inc/camofox-browser . &&
+               npm install && npm start"
     ports:
       - "9377:9377"
     environment:
-      - CAMOFOX_ACCESS_KEY=${CAMOFOX_ACCESS_KEY:-}
+      - CAMOFOX_ACCESS_KEY=${CAMOFOX_ACCESS_KEY}
       - CAMOFOX_PORT=9377
     restart: unless-stopped
     volumes:
       - camofox_data:/home/node/.camofox
-    healthcheck:
-      test: ["CMD", "curl", "-sf", "http://localhost:9377/health"]
-      interval: 15s
-      timeout: 5s
-      retries: 5
-      start_period: 30s
     logging:
       driver: json-file
       options:
