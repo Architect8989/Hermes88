@@ -1,0 +1,179 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Rhodawk AI — Hermes88 Peak Architecture  v1.0
+#
+# Architecture:
+#   hermes-agent (NousResearch) — orchestration engine, skills, provider routing
+#     └─ gateway/run.py — Telegram adapter + Peak event/task orchestration
+#   openclaude (Gitlawb/openclaude) — precision coder via gRPC server at :50051
+#   jcode (1jehuang/jcode) — parallel scaffolding swarm server at :7865
+#   rhodawk_core — memory engine, task engine, event bus, orchestrator, synthesis
+#   MCP shared layer — filesystem + github + fetch + brave-search
+#
+# Key additions over base Dockerfile:
+#   - ffmpeg for voice transcription (openai-whisper)
+#   - pandoc for document generation (pypandoc)
+#   - Enhanced requirements.txt with all peak subsystem dependencies
+#   - Event router + task worker processes in supervisord
+#   - Obsidian vault directory structure
+#   - Health check endpoint at :8080
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM ubuntu:22.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+
+# ── System packages ────────────────────────────────────────────────────────────
+# Core: python3.11, pip, curl, wget, git, supervisor, build-essential
+# Media: ffmpeg (voice transcription via openai-whisper)
+# Docs: pandoc (document generation via pypandoc for PDF/DOCX/HTML export)
+# PDF: libmupdf-dev, poppler-utils (PDF extraction for ingest-media action)
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3-pip python3.11-venv \
+    curl wget git supervisor \
+    build-essential ca-certificates \
+    ffmpeg \
+    pandoc \
+    libmupdf-dev poppler-utils \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── ripgrep 14.1.0 (required by openclaude for codebase search) ────────────────
+RUN curl -LO https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep_14.1.0-1_amd64.deb \
+    && dpkg -i ripgrep_14.1.0-1_amd64.deb \
+    && rm ripgrep_14.1.0-1_amd64.deb
+
+# ── Node.js 24 (required by openclaude + MCP servers) ─────────────────────────
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && node --version \
+    && npm --version \
+    && echo "[node] Version: $(node --version) — ?? operator supported"
+
+# ── Bun runtime (required by @gitlawb/openclaude for gRPC TypeScript scripts) ─
+RUN npm install -g bun \
+    && bun --version && echo "[bun] installed OK"
+
+# ── Python 3.11 aliases ────────────────────────────────────────────────────────
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python  python  /usr/bin/python3.11 1 \
+    && pip3 install --upgrade pip setuptools wheel
+
+# ─────────────────────────────────────────────────────────────────────────────
+# ── Agent 1: HERMES-AGENT ────────────────────────────────────────────────────
+# Install with [messaging] extra to ensure python-telegram-bot is included.
+# ─────────────────────────────────────────────────────────────────────────────
+RUN pip3 install --no-cache-dir "hermes-agent[messaging]>=0.10.0" \
+    || pip3 install --no-cache-dir "hermes-agent>=0.10.0" \
+    || echo "[hermes-agent] PyPI package not available — built-in gateway.run will be used"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Python dependencies — install from enhanced requirements.txt
+# Includes all peak subsystem deps: memory, orchestrator, task engine, etc.
+# ─────────────────────────────────────────────────────────────────────────────
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent 2: OPENCLAUDE — cloned from GitHub source
+#   Role: Precision coder — surgical edits, bug fixes via gRPC server at :50051
+#   LLM:  DO Inference deepseek-v4-pro (CLAUDE_CODE_USE_OPENAI=1)
+#   Mode: gRPC server (bun run dev:grpc from source)
+# ─────────────────────────────────────────────────────────────────────────────
+RUN git clone --depth=1 https://github.com/Gitlawb/openclaude.git /opt/openclaude \
+    && cd /opt/openclaude \
+    && bun install \
+    && python3 -c "import re,sys; f='src/entrypoints/sdk/index.ts'; t=open(f).read(); p=re.sub(r'^detectStubLeaks\(\);?$','// detectStubLeaks() // patched: Bun v1.3 TDZ bug',t,flags=re.MULTILINE); (sys.exit('PATCH FAILED') if p==t else None); open(f,'w').write(p); print('Patched:',f)" \
+    && echo "[openclaude] source ready — $(ls scripts/start-grpc.ts) present" \
+    || echo "[openclaude] source unavailable — Python gRPC server fallback will be used"
+
+# Install grpc Python client for openclaude gRPC seam
+RUN pip3 install --no-cache-dir grpcio grpcio-tools protobuf
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Agent 3: JCODE (1jehuang/jcode)
+#   Role: Parallel scaffolding swarm — multi-file generation, server at :7865
+# ─────────────────────────────────────────────────────────────────────────────
+RUN curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh \
+    | bash 2>/dev/null \
+    && jcode --version 2>/dev/null \
+    || echo "[jcode] install via script failed — trying cargo fallback" \
+    && (which cargo && cargo install jcode 2>/dev/null || true)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Shared MCP layer — filesystem + github + fetch + brave-search
+# ─────────────────────────────────────────────────────────────────────────────
+RUN npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm config set fetch-retries 5
+RUN npm install -g @modelcontextprotocol/server-filesystem \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-filesystem) \
+    && echo "[mcp] server-filesystem OK"
+RUN npm install -g @modelcontextprotocol/server-github \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-github) \
+    && echo "[mcp] server-github OK"
+RUN npm install -g @modelcontextprotocol/server-fetch \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-fetch) \
+    || echo "[mcp] server-fetch install failed (non-critical — skipping)"
+RUN npm install -g @modelcontextprotocol/server-brave-search \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-brave-search) \
+    || echo "[mcp] server-brave-search install failed (non-critical — skipping)"
+
+# ── App structure ───────────────────────────────────────────────────────────────
+WORKDIR /app
+COPY . /app/
+
+# ── Generate openclaude gRPC Python stubs from proto ───────────────────────────
+RUN python3 -m grpc_tools.protoc \
+       -I/app/openclaude_grpc \
+       --python_out=/app/openclaude_grpc \
+       --grpc_python_out=/app/openclaude_grpc \
+       /app/openclaude_grpc/openclaude.proto \
+    && echo "[grpc-stubs] Generated openclaude_pb2.py and openclaude_pb2_grpc.py" \
+    || echo "[grpc-stubs] Proto compilation failed (non-critical — Python fallback available)"
+
+# ── Git global config ───────────────────────────────────────────────────────────
+RUN git config --global user.email "hermes@rhodawk.ai" \
+    && git config --global user.name  "Hermes Bot" \
+    && git config --global safe.directory "*"
+
+# ── Runtime directories ─────────────────────────────────────────────────────────
+RUN mkdir -p /tmp/repos /var/log \
+    && mkdir -p /data/.hermes/skills/devops-pipeline \
+                /data/.hermes/memories \
+                /data/.hermes/sessions \
+                /data/.hermes/logs \
+                /data/.hermes/cron \
+                /data/.hermes/plugins \
+    && mkdir -p /data/.hermes/obsidian-vault/daily \
+                /data/.hermes/obsidian-vault/projects \
+                /data/.hermes/obsidian-vault/research \
+                /data/.hermes/obsidian-vault/decisions \
+                /data/.hermes/obsidian-vault/templates \
+    && mkdir -p /root/.jcode \
+                /root/.claude \
+    && chmod -R 755 /data
+
+# ── Script permissions ──────────────────────────────────────────────────────────
+RUN chmod +x /app/scripts/init_and_start.sh \
+    && chmod +x /app/scripts/rhodawk_orchestrator.sh \
+    && chmod +x /app/scripts/health_check.sh \
+    && chmod +x /app/bot/telegram_bot.py \
+    && chmod +x /app/main.py \
+    || true
+
+# ── Force-reinstall python-telegram-bot LAST so it is never shadowed ───────────
+RUN pip3 install --no-cache-dir --force-reinstall "python-telegram-bot>=20.7" \
+    && python3 -c "from telegram.ext import Application; print('[ptb] python-telegram-bot OK')"
+
+COPY supervisord.peak.conf /etc/supervisor/conf.d/rhodawk.conf
+
+# ── Health check endpoint configuration ────────────────────────────────────────
+# Port 8080 exposes the internal health check API (FastAPI/uvicorn)
+# Port 7860 is the legacy hermes-agent WebUI port (kept for compatibility)
+EXPOSE 7860 8080
+
+# ── Entrypoint ─────────────────────────────────────────────────────────────────
+# init_and_start.sh calls rhodawk_orchestrator.sh then starts supervisord
+CMD ["/app/scripts/init_and_start.sh"]
