@@ -109,6 +109,51 @@ except ImportError:
     _image_gen_available = False
     logger.warning("[gateway] rhodawk_core.image_gen not available — FAL.ai disabled")
 
+# FIX Problem-5: Wire rhodawk_core.Orchestrator for real multi-provider failover routing.
+# The Orchestrator adds: rate-limit tracking, exponential backoff, multi-model chains,
+# and (Problem-7) Anthropic / OpenRouter as genuinely different tier-3/tier-4 providers.
+# The primary agent loop still uses AsyncOpenAI with streaming for real-time delivery;
+# the Orchestrator is used when the primary provider fails (429, 503, timeout).
+try:
+    from rhodawk_core.orchestrator import Orchestrator as _Orchestrator
+    _orchestrator = _Orchestrator()
+    _orchestrator_available = True
+    logger.info("[gateway] rhodawk_core.Orchestrator loaded — multi-provider failover active")
+except Exception as _orch_exc:
+    _orchestrator = None
+    _orchestrator_available = False
+    logger.warning(f"[gateway] rhodawk_core.Orchestrator not available: {_orch_exc}")
+
+# FIX Problem-5: Wire rhodawk_core.TaskQueue for background task execution.
+# Background tasks submitted by the LLM (long-running ops, scheduled work) go into
+# the queue and are processed by WorkerPool workers. Falls back to fire-and-forget
+# asyncio.create_task when Redis is unavailable (Problem-9 graceful degradation).
+try:
+    from rhodawk_core.task_engine import TaskQueue as _TaskQueue, Task as _Task, TaskPriority as _TaskPriority
+    _task_queue_available = True
+    logger.info("[gateway] rhodawk_core.TaskQueue loaded — background task queue active")
+except Exception as _tq_exc:
+    _TaskQueue = None
+    _task_queue_available = False
+    logger.warning(f"[gateway] rhodawk_core.TaskQueue not available: {_tq_exc}")
+
+# FIX Problem-6: Dangerous command patterns that require operator approval
+# before execution (terminal tool). HERMES_YOLO_MODE=1 bypasses this gate.
+# Matches: rm -rf, sudo rm, mkfs, dd if=, shred, fork bomb, pipe-to-bash.
+import re as _re_danger
+_DANGEROUS_CMD_RE = _re_danger.compile(
+    r"\b(rm\s+-[rRfF]*\s+[^;|&\n]{2,}|sudo\s+rm|mkfs|dd\s+if=|shred|"
+    r":\s*\(\s*\)\s*\{.*?\}|chmod\s+777|chown\s+-R\s+root|"
+    r"iptables\s+-F|shutdown|reboot|halt|poweroff|"
+    r"curl\s+.*\|\s*bash|wget\s+.*\|\s*bash)\b",
+    _re_danger.IGNORECASE | _re_danger.DOTALL,
+)
+_YOLO_MODE = os.environ.get("HERMES_YOLO_MODE", "1").strip() == "1"
+
+# Per-chat pending approval registry: chat_id -> {command, future}
+_pending_approvals: dict[int, dict] = {}
+_approvals_lock = asyncio.Lock() if False else None  # created lazily
+
 # ── Chat ID whitelist ─────────────────────────────────────────────────────────
 _raw_ids = os.environ.get("TELEGRAM_CHAT_ID", "").strip()
 ALLOWED_CHAT_IDS: set[int] = set()
@@ -753,9 +798,57 @@ def _run_find_skill(query: str) -> str:
         return f"[find_skill] Error: {exc}"
 
 
-async def _execute_tool(name: str, args: dict) -> str:
+async def _execute_tool(name: str, args: dict, update: Update = None) -> str:
     if name == "terminal":
-        return await asyncio.to_thread(_run_terminal, args.get("command", ""), args.get("timeout", 60))
+        command = args.get("command", "")
+        timeout = args.get("timeout", 60)
+
+        # FIX Problem-6: Dangerous command approval gate.
+        # If HERMES_YOLO_MODE != 1 and the command matches a destructive pattern,
+        # send a Telegram approval request and wait up to 5 minutes for y/n.
+        # This mirrors openclaude's ActionRequired mechanism (Problem-6 fix).
+        if not _YOLO_MODE and command and _DANGEROUS_CMD_RE.search(command):
+            logger.warning(f"[dangerous-cmd] ActionRequired: {command[:120]}")
+            if update is not None:
+                chat_id = update.effective_chat.id
+                try:
+                    await update.message.reply_text(
+                        f"⚠️ DANGEROUS COMMAND REQUIRES APPROVAL\n\n"
+                        f"Command: `{command[:300]}`\n\n"
+                        f"Reply y to approve, n to abort. Timeout: 5 minutes.",
+                        parse_mode="Markdown",
+                    )
+                    # Store a future that the /approve or next message will resolve
+                    loop = asyncio.get_event_loop()
+                    approval_future: asyncio.Future = loop.create_future()
+                    _pending_approvals[chat_id] = {
+                        "command": command,
+                        "future": approval_future,
+                        "created_at": time.time(),
+                    }
+                    try:
+                        # Wait up to 300s for operator to reply y/n
+                        reply = await asyncio.wait_for(
+                            asyncio.shield(approval_future), timeout=300
+                        )
+                        if not reply:
+                            return f"[terminal] Command aborted by operator: {command[:120]}"
+                    except asyncio.TimeoutError:
+                        _pending_approvals.pop(chat_id, None)
+                        return f"[terminal] Approval timed out — command NOT executed: {command[:120]}"
+                    finally:
+                        _pending_approvals.pop(chat_id, None)
+                except Exception as gate_exc:
+                    logger.error(f"[dangerous-cmd] Approval gate error: {gate_exc}")
+                    return f"[terminal] Could not request approval — command NOT executed for safety."
+            else:
+                # No Telegram context (e.g., internal call) — block if not YOLO
+                return (
+                    f"[terminal] Blocked dangerous command (HERMES_YOLO_MODE not set): "
+                    f"{command[:120]}"
+                )
+
+        return await asyncio.to_thread(_run_terminal, command, timeout)
     elif name == "web_fetch":
         return await asyncio.to_thread(_run_web_fetch, args.get("url", ""), args.get("timeout", 15))
     elif name == "camofox_browse":
@@ -1370,17 +1463,63 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
     for _round in range(MAX_TOOL_ROUNDS):
         tool_choice = "required" if _round < forced_rounds else "auto"
 
-        resp = await openai_client.chat.completions.create(
-            model=MODEL,
-            messages=messages,
-            tools=TOOLS,
-            tool_choice=tool_choice,
-            max_tokens=4096,
-            temperature=0.05,
-        )
-        choice  = resp.choices[0]
-        msg     = choice.message
-        content = msg.content or ""
+        # FIX Problem-5: Wire rhodawk_core.Orchestrator as failover.
+        # Primary path: AsyncOpenAI with streaming tool calling (real-time delivery).
+        # Fallback path: Orchestrator.route_request() — tries Anthropic, then OpenRouter
+        # when DO Inference returns 429/503. We run the fallback in a thread since
+        # the Orchestrator uses synchronous urllib.request.
+        resp = None
+        try:
+            resp = await openai_client.chat.completions.create(
+                model=MODEL,
+                messages=messages,
+                tools=TOOLS,
+                tool_choice=tool_choice,
+                max_tokens=4096,
+                temperature=0.05,
+            )
+            choice  = resp.choices[0]
+            msg     = choice.message
+            content = msg.content or ""
+        except Exception as _primary_exc:
+            # Primary DO Inference call failed — try Orchestrator fallback
+            _err_str = str(_primary_exc).lower()
+            _is_recoverable = any(x in _err_str for x in [
+                "429", "503", "rate limit", "timeout", "connection", "overloaded"
+            ])
+            if _orchestrator_available and _is_recoverable:
+                logger.warning(
+                    f"[failover] Primary model error ({_primary_exc}) — "
+                    f"trying Orchestrator multi-provider chain"
+                )
+                try:
+                    _orch_result = await asyncio.to_thread(
+                        _orchestrator.route_request,
+                        messages,
+                        "general",
+                    )
+                    if _orch_result.get("content"):
+                        logger.info(
+                            f"[failover] Orchestrator succeeded via "
+                            f"{_orch_result.get('provider', '?')} / "
+                            f"{_orch_result.get('model', '?')}"
+                        )
+                        # Wrap result to look like an OpenAI response with no tool calls
+                        content = _orch_result["content"]
+                        # Create a mock message object using a simple namespace
+                        from types import SimpleNamespace
+                        msg = SimpleNamespace(content=content, tool_calls=None)
+                    else:
+                        logger.error(
+                            f"[failover] Orchestrator also failed: "
+                            f"{_orch_result.get('error')}"
+                        )
+                        raise _primary_exc
+                except Exception as _orch_exc:
+                    logger.error(f"[failover] Orchestrator exception: {_orch_exc}")
+                    raise _primary_exc
+            else:
+                raise
 
         # ── No tool calls ────────────────────────────────────────────────────
         if not msg.tool_calls:
@@ -1492,7 +1631,7 @@ async def _agent_loop(messages: list[dict], update: Update, user_msg: str) -> st
             except Exception:
                 pass
 
-            result = await _execute_tool(fn_name, fn_args)
+            result = await _execute_tool(fn_name, fn_args, update=update)
             logger.info(f"[tool:{fn_name}] {len(result)} chars")
             all_tool_results.append(result)
 

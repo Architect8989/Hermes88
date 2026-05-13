@@ -1,44 +1,108 @@
 #!/bin/bash
-# jcode — scaffolding swarm wrapper for Rhodawk Hermes
-# Calls DigitalOcean Inference (OpenAI-compatible) to scaffold files.
-# Installed at /usr/local/bin/jcode by Dockerfile.vps.
+# jcode — Rhodawk scaffolding agent (Problem-3 fix)
+#
+# FIX Problem-3: Attempt to use the real jcode binary first.
+# The real 1jehuang/jcode binary provides: multi-agent coordination server at :7865,
+# shared file state tracking, conflict notification when two agents modify the same
+# file, ONNX local embeddings, persistent memory. If the real binary is available
+# (via PATH, e.g. installed from the jcode release tarball), use it directly.
+# Fall back to the Rhodawk API wrapper ONLY when the real binary is not found.
+#
+# Problem-3 root cause: calling a single-shot API endpoint and writing files
+# with no coordination is not a swarm — it's a race condition generator.
+# The coordination daemon (coord_daemon.py) + per-file lockfiles fix this.
 #
 # Usage:
-#   jcode run --message "Create app.py: Flask app with GET /ping" [--workdir /tmp/out]
+#   jcode run --message "Create app.py: Flask app with GET /ping" [--workdir DIR]
+#   jcode serve --port 7865
 #   jcode --version
 #   jcode --help
 #
-# Env vars (all exported by init_and_start.sh):
+# Env vars:
 #   OPENAI_API_KEY or DO_INFERENCE_API_KEY
 #   OPENAI_BASE_URL or DO_INFERENCE_BASE_URL
-#   JCODE_MODEL or OPENAI_MODEL (default: deepseek-v4-pro)
-set -e
+#   JCODE_MODEL or OPENAI_MODEL
+set -euo pipefail
 
-VERSION="1.0.0-rhodawk"
-
+RHODAWK_VERSION="2.0.0-rhodawk"
 MODEL="${JCODE_MODEL:-${OPENAI_MODEL:-deepseek-v4-pro}}"
 BASE_URL="${OPENAI_BASE_URL:-${DO_INFERENCE_BASE_URL:-}}"
 API_KEY="${OPENAI_API_KEY:-${DO_INFERENCE_API_KEY:-}}"
 WORKDIR="${JCODE_WORKDIR:-/tmp/jcode_out}"
+SESSION_KEY=""
 MESSAGE=""
 SUBCOMMAND=""
+NON_INTERACTIVE=0
+SERVE_PORT=7865
 
+# ── Check for real jcode binary (not our wrapper) ────────────────────────────
+# The real binary reports a version like "jcode 0.12.0" not "jcode X.Y.Z-rhodawk"
+_REAL_JCODE=""
+for candidate in "/usr/bin/jcode-real" "/opt/jcode/bin/jcode" "$HOME/.local/bin/jcode-real"; do
+  if [ -x "$candidate" ]; then
+    _REAL_JCODE="$candidate"
+    break
+  fi
+done
+
+# ── Argument parsing ─────────────────────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
   case $1 in
-    run)       SUBCOMMAND="run"; shift ;;
-    serve)     echo "[jcode] serve mode: sleeping (no daemon needed for wrapper)"; exec sleep infinity ;;
-    --version) echo "jcode $VERSION (Rhodawk wrapper → $MODEL)"; exit 0 ;;
-    --help)    echo "Usage: jcode run --message \"...\" [--workdir DIR]"; exit 0 ;;
-    --message) MESSAGE="$2"; shift 2 ;;
-    --workdir) WORKDIR="$2"; shift 2 ;;
-    *)         shift ;;
+    run)             SUBCOMMAND="run"; shift ;;
+    serve)           SUBCOMMAND="serve"; shift ;;
+    --version)
+      if [ -n "$_REAL_JCODE" ]; then
+        "$_REAL_JCODE" --version
+      else
+        echo "jcode $RHODAWK_VERSION (Rhodawk API wrapper → $MODEL)"
+        echo "Real jcode binary: not installed (swarm coordination via coord_daemon.py)"
+      fi
+      exit 0 ;;
+    --help)
+      echo "Usage: jcode run --message \"...\" [--workdir DIR] [--session KEY] [--non-interactive]"
+      echo "       jcode serve --port PORT"
+      exit 0 ;;
+    --message|-m)    MESSAGE="$2"; shift 2 ;;
+    --workdir|-w)    WORKDIR="$2"; shift 2 ;;
+    --session|-s)    SESSION_KEY="$2"; shift 2 ;;
+    --non-interactive) NON_INTERACTIVE=1; shift ;;
+    --port)          SERVE_PORT="$2"; shift 2 ;;
+    *)               shift ;;
   esac
 done
+
+# ── serve mode — delegate to real jcode or coord_daemon ──────────────────────
+if [ "$SUBCOMMAND" = "serve" ]; then
+  if [ -n "$_REAL_JCODE" ]; then
+    echo "[jcode] serve: delegating to real jcode binary at $_REAL_JCODE"
+    exec "$_REAL_JCODE" serve --port "$SERVE_PORT"
+  else
+    echo "[jcode] serve: starting Rhodawk coordination daemon on port $SERVE_PORT"
+    exec python3 /app/skills/jcode_swarm/coord_daemon.py --port "$SERVE_PORT"
+  fi
+fi
+
+# ── run mode ──────────────────────────────────────────────────────────────────
+if [ "$SUBCOMMAND" != "run" ]; then
+  echo "jcode: subcommand required (run | serve | --version | --help)" >&2
+  exit 1
+fi
 
 if [ -z "$MESSAGE" ]; then
   echo "jcode: --message required" >&2
   exit 1
 fi
+
+# Delegate to real jcode binary if available
+if [ -n "$_REAL_JCODE" ]; then
+  echo "[jcode] Delegating to real jcode binary at $_REAL_JCODE"
+  ARGS=("$_REAL_JCODE" run --message "$MESSAGE" --workdir "$WORKDIR")
+  [ -n "$SESSION_KEY" ] && ARGS+=(--session "$SESSION_KEY")
+  [ "$NON_INTERACTIVE" = "1" ] && ARGS+=(--non-interactive)
+  exec "${ARGS[@]}"
+fi
+
+# ── Rhodawk API wrapper (fallback when real binary unavailable) ───────────────
 if [ -z "$BASE_URL" ]; then
   echo "jcode: OPENAI_BASE_URL or DO_INFERENCE_BASE_URL not set" >&2
   exit 1
@@ -49,31 +113,60 @@ if [ -z "$API_KEY" ]; then
 fi
 
 mkdir -p "$WORKDIR"
+LOCK_DIR="/tmp/jcode_locks"
+mkdir -p "$LOCK_DIR"
 
-SYSTEM_PROMPT="You are a code scaffolding generator. Output ONLY file contents with file paths as comment headers. Format exactly:
-# FILE: relative/path/to/file.py
-<file contents here>
-# FILE: relative/path/to/another.py
-<file contents here>
-Generate all files needed to satisfy the request. No explanations. No markdown fences."
+echo "[jcode] Rhodawk API wrapper — model=$MODEL workdir=$WORKDIR"
+[ -n "$SESSION_KEY" ] && echo "[jcode] Session: $SESSION_KEY"
 
 python3 - << PYEOF
-import json, os, sys, re, urllib.request, urllib.error
+import json, os, sys, re, time, fcntl, pathlib, urllib.request, urllib.error
 
-base_url = os.environ.get('OPENAI_BASE_URL') or os.environ.get('DO_INFERENCE_BASE_URL', '')
-api_key  = os.environ.get('OPENAI_API_KEY') or os.environ.get('DO_INFERENCE_API_KEY', '')
-model    = os.environ.get('JCODE_MODEL') or os.environ.get('OPENAI_MODEL', 'deepseek-v4-pro')
-workdir  = '$WORKDIR'
-message  = '''$MESSAGE'''
+base_url    = os.environ.get('OPENAI_BASE_URL') or os.environ.get('DO_INFERENCE_BASE_URL', '')
+api_key     = os.environ.get('OPENAI_API_KEY') or os.environ.get('DO_INFERENCE_API_KEY', '')
+model       = os.environ.get('JCODE_MODEL') or os.environ.get('OPENAI_MODEL', 'deepseek-v4-pro')
+workdir     = '$WORKDIR'
+message     = r"""$MESSAGE"""
+lock_dir    = '$LOCK_DIR'
+session_key = '$SESSION_KEY'
+
+# Load session memory if session key provided
+session_context = ""
+if session_key:
+    session_file = pathlib.Path(lock_dir) / f"session_{session_key}.json"
+    if session_file.exists():
+        try:
+            sess_data = json.loads(session_file.read_text())
+            history = sess_data.get("history", [])
+            if history:
+                session_context = "\\n\\nSESSION CONTEXT (prior work):\\n" + "\\n".join(
+                    f"- {h}" for h in history[-10:]
+                )
+        except Exception:
+            pass
+
+system_prompt = """You are a code scaffolding agent. Output ONLY file contents.
+Format exactly:
+# FILE: relative/path/to/file.py
+<complete file contents>
+# FILE: another/path.py
+<complete file contents>
+
+Rules:
+- Write complete files (no patches, no diffs).
+- No markdown fences. No explanations. No commentary.
+- File paths are relative to the working directory.
+- Generate all files needed to satisfy the request.
+- If files already exist in the session context, update them consistently."""
 
 payload = json.dumps({
     'model': model,
     'messages': [
-        {'role': 'system', 'content': """$SYSTEM_PROMPT"""},
-        {'role': 'user',   'content': message},
+        {'role': 'system', 'content': system_prompt},
+        {'role': 'user',   'content': message + session_context},
     ],
-    'temperature': 0.3,
-    'max_tokens': 8192,
+    'temperature': 0.1,
+    'max_tokens': 16384,
 }).encode()
 
 req = urllib.request.Request(
@@ -86,41 +179,92 @@ req = urllib.request.Request(
     method='POST',
 )
 
-try:
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        data = json.loads(resp.read())
-except urllib.error.HTTPError as e:
-    print(f'jcode: HTTP {e.code} from inference endpoint', file=sys.stderr)
-    print(e.read().decode(), file=sys.stderr)
-    sys.exit(1)
+# Retry with exponential backoff
+content = ''
+for attempt in range(3):
+    try:
+        with urllib.request.urlopen(req, timeout=180) as resp:
+            data = json.loads(resp.read())
+        content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
+        break
+    except urllib.error.HTTPError as e:
+        if e.code in (429, 503) and attempt < 2:
+            wait = 2 ** attempt * 3
+            print(f'[jcode] HTTP {e.code} — retrying in {wait}s', flush=True)
+            time.sleep(wait)
+            continue
+        print(f'[jcode] HTTP {e.code} from inference endpoint', file=sys.stderr, flush=True)
+        sys.exit(1)
+    except Exception as e:
+        print(f'[jcode] Request error: {e}', file=sys.stderr, flush=True)
+        if attempt < 2:
+            time.sleep(2)
+            continue
+        sys.exit(1)
 
-content = data.get('choices', [{}])[0].get('message', {}).get('content', '')
 if not content:
-    print('jcode: empty response from model', file=sys.stderr)
+    print('[jcode] empty response from model', file=sys.stderr, flush=True)
     sys.exit(1)
 
 pattern = re.compile(r'^#\s*FILE:\s*(.+)$')
 current_file = None
 current_lines = []
+files_written = []
 
-def flush(path, lines):
+def flush_file(path, lines):
     if not path or not lines:
         return
-    fpath = os.path.join(workdir, path.lstrip('/'))
-    os.makedirs(os.path.dirname(fpath) or workdir, exist_ok=True)
-    with open(fpath, 'w') as f:
-        f.write('\n'.join(lines).strip() + '\n')
-    print(f'jcode: wrote {fpath} ({len(lines)} lines)')
+    # Sanitize path — prevent directory traversal
+    clean = path.lstrip('/').lstrip('./')
+    if '..' in clean:
+        print(f'[jcode] Rejected path: {path}', file=sys.stderr, flush=True)
+        return
 
-for line in content.split('\n'):
+    fpath = pathlib.Path(workdir) / clean
+
+    # Problem-3 fix: acquire per-file lock before writing
+    # This prevents two parallel swarm workers from clobbering the same file.
+    lock_path = pathlib.Path(lock_dir) / clean.replace('/', '_').replace('\\\\', '_') + '.lock'
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    fpath.parent.mkdir(parents=True, exist_ok=True)
+
+    with open(str(lock_path), 'w') as lock_f:
+        try:
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            print(f'[jcode] WARNING: file lock conflict on {clean} — waiting', flush=True)
+            fcntl.flock(lock_f.fileno(), fcntl.LOCK_EX)
+
+        content_str = '\\n'.join(lines).strip() + '\\n'
+        with open(str(fpath), 'w') as f:
+            f.write(content_str)
+        files_written.append(clean)
+        print(f'[jcode] wrote {fpath} ({len(lines)} lines)', flush=True)
+
+        fcntl.flock(lock_f.fileno(), fcntl.LOCK_UN)
+
+for line in content.split('\\n'):
     m = pattern.match(line)
     if m:
-        flush(current_file, current_lines)
+        flush_file(current_file, current_lines)
         current_file = m.group(1).strip()
         current_lines = []
     elif current_file is not None:
         current_lines.append(line)
 
-flush(current_file, current_lines)
-print(f'jcode: done — files in {workdir}')
+flush_file(current_file, current_lines)
+
+# Update session memory
+if session_key and files_written:
+    session_file = pathlib.Path(lock_dir) / f'session_{session_key}.json'
+    try:
+        sess_data = json.loads(session_file.read_text()) if session_file.exists() else {}
+        history = sess_data.get('history', [])
+        history.append(f'{message[:80]} → wrote {", ".join(files_written[:5])}')
+        sess_data['history'] = history[-50:]
+        session_file.write_text(json.dumps(sess_data))
+    except Exception:
+        pass
+
+print(f'[jcode] done — {len(files_written)} files written to {workdir}', flush=True)
 PYEOF

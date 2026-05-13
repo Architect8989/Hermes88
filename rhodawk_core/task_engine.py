@@ -6,8 +6,10 @@ Background execution with Redis-backed queue, priority scheduling,
 parallel async workers, real-time Telegram status streaming,
 retry policies, and task lifecycle management.
 
-Wraps patterns from dramatiq (task queue with Redis broker) for reliable
-background task processing.
+FIX Problem-9: TaskQueue.connect() now gracefully degrades to an in-memory
+queue when Redis is unavailable (package not installed, or connection refused).
+The RuntimeError that previously crashed the gateway on startup has been replaced
+with a warning + automatic fallback to InMemoryTaskQueue.
 
 Copyright (c) 2024-2025 Rhodawk AI. All rights reserved.
 """
@@ -101,12 +103,134 @@ class Task:
         )
 
 
-# -- Task Queue (Redis-backed) ---------------------------------------------------
+# -- In-Memory Fallback Queue (Problem-9 fix) ------------------------------------
+
+
+class InMemoryTaskQueue:
+    """
+    In-memory priority queue fallback when Redis is unavailable.
+
+    FIX Problem-9: Provides a degraded but functional task queue that
+    does NOT require Redis. Tasks are not persisted across restarts,
+    PubSub events are no-ops, and result TTLs are not enforced.
+    Functionally equivalent for single-process usage.
+    """
+
+    def __init__(self, queue_name: str = "hermes:tasks"):
+        self.queue_name = queue_name
+        self._queue: list = []  # List of (score, task_id)
+        self._tasks: dict = {}  # task_id -> Task
+        self._results: dict = {}  # task_id -> Task
+        self._lock = asyncio.Lock()
+        print(
+            f"[task_engine] WARNING: Using in-memory queue (Redis unavailable). "
+            f"Tasks will not survive restarts.",
+            flush=True,
+        )
+
+    async def connect(self):
+        pass  # No connection needed
+
+    async def close(self):
+        pass
+
+    async def submit(self, task: Task) -> str:
+        async with self._lock:
+            score = task.priority * 1e10 + task.created_at
+            self._queue.append((score, task.id))
+            self._queue.sort(key=lambda x: x[0])
+            self._tasks[task.id] = task
+        return task.id
+
+    async def dequeue(self, timeout: int = 5) -> Optional[Task]:
+        async with self._lock:
+            if not self._queue:
+                return None
+            _, task_id = self._queue.pop(0)
+            task = self._tasks.get(task_id)
+            if not task:
+                return None
+            task.status = TaskStatus.RUNNING
+            task.started_at = time.time()
+            return task
+
+    async def complete(self, task: Task, result: str = ""):
+        task.status = TaskStatus.COMPLETED
+        task.completed_at = time.time()
+        task.result = result
+        task.progress = 1.0
+        async with self._lock:
+            self._results[task.id] = task
+
+    async def fail(self, task: Task, error: str):
+        task.retries += 1
+        if task.retries < task.max_retries:
+            task.status = TaskStatus.RETRYING
+            task.error = error
+            await asyncio.sleep(min(60, task.retries * 5))
+            task.status = TaskStatus.PENDING
+            await self.submit(task)
+        else:
+            task.status = TaskStatus.FAILED
+            task.completed_at = time.time()
+            task.error = error
+            async with self._lock:
+                self._results[task.id] = task
+
+    async def cancel(self, task_id: str) -> bool:
+        async with self._lock:
+            self._queue = [(s, tid) for s, tid in self._queue if tid != task_id]
+            task = self._tasks.get(task_id)
+            if task:
+                task.status = TaskStatus.CANCELLED
+                return True
+            return False
+
+    async def get_status(self, task_id: str) -> Optional[Dict[str, Any]]:
+        task = self._tasks.get(task_id) or self._results.get(task_id)
+        if not task:
+            return None
+        return {"status": task.status, "progress": str(task.progress)}
+
+    async def update_progress(self, task: Task, progress: float, message: str = ""):
+        task.progress = min(1.0, max(0.0, progress))
+        task.progress_message = message
+
+    async def get_queue_stats(self) -> Dict[str, Any]:
+        async with self._lock:
+            return {
+                "pending": len(self._queue),
+                "queue_name": self.queue_name + " (in-memory)",
+                "timestamp": datetime.now(timezone.utc).isoformat(),
+            }
+
+    async def get_pending_tasks(self, limit: int = 20) -> List[Dict[str, Any]]:
+        async with self._lock:
+            return [
+                {"task_id": tid, "score": s, "status": "pending"}
+                for s, tid in self._queue[:limit]
+            ]
+
+    async def _update_status(self, task: Task):
+        pass  # State is already in-memory
+
+    async def _store_result(self, task: Task):
+        self._results[task.id] = task
+
+    async def _publish_event(self, event_type: str, task: Task):
+        pass  # No PubSub without Redis
+
+
+# -- Task Queue (Redis-backed with graceful degradation) -------------------------
 
 
 class TaskQueue:
     """
     Redis-backed priority task queue with status tracking.
+
+    FIX Problem-9: connect() no longer raises RuntimeError when Redis is
+    unavailable. Instead it transparently switches to InMemoryTaskQueue and
+    logs a WARNING. All public methods delegate to whichever backend is active.
 
     Uses sorted sets for priority ordering and hashes for task state.
     Supports submission, dequeue, completion, failure with retry,
@@ -122,30 +246,60 @@ class TaskQueue:
         self.result_prefix = "hermes:task:result:"
         self.result_ttl = 86400  # 24 hours
         self._client: Optional[Any] = None
+        self._degraded = False  # True = using InMemoryTaskQueue fallback
+        self._fallback: Optional[InMemoryTaskQueue] = None
 
     async def connect(self):
-        """Establish connection to Redis."""
+        """
+        Establish connection to Redis.
+
+        FIX Problem-9: gracefully degrades to InMemoryTaskQueue instead of
+        raising RuntimeError when Redis is unavailable.
+        """
         if not REDIS_AVAILABLE:
-            raise RuntimeError("redis package not installed - task queue requires redis")
-        self._client = aioredis.from_url(self.redis_url, decode_responses=True)
+            print(
+                "[task_engine] WARNING: redis package not installed — "
+                "falling back to in-memory task queue (pip install redis to enable)",
+                flush=True,
+            )
+            self._degraded = True
+            self._fallback = InMemoryTaskQueue(self.queue_name)
+            return
+
+        try:
+            client = aioredis.from_url(self.redis_url, decode_responses=True)
+            await client.ping()
+            self._client = client
+            self._degraded = False
+            print(
+                f"[task_engine] Redis connected at {self.redis_url}",
+                flush=True,
+            )
+        except Exception as exc:
+            print(
+                f"[task_engine] WARNING: Redis connection failed ({exc}) — "
+                f"falling back to in-memory task queue",
+                flush=True,
+            )
+            self._degraded = True
+            self._fallback = InMemoryTaskQueue(self.queue_name)
 
     async def close(self):
         """Close the Redis connection."""
-        if self._client:
+        if self._degraded and self._fallback:
+            await self._fallback.close()
+        elif self._client:
             await self._client.close()
             self._client = None
 
     async def submit(self, task: Task) -> str:
-        """
-        Submit a task to the queue. Returns the task ID.
+        """Submit a task to the queue. Returns the task ID."""
+        if self._degraded:
+            return await self._fallback.submit(task)
 
-        The task is stored in Redis hash for state and added to
-        a sorted set for priority-based dequeuing.
-        """
         if not self._client:
             await self.connect()
 
-        # Store task state
         await self._client.hset(
             f"{self.status_prefix}{task.id}",
             mapping={
@@ -157,11 +311,9 @@ class TaskQueue:
             },
         )
 
-        # Add to priority queue (lower score = higher priority)
         score = task.priority * 1e10 + task.created_at
         await self._client.zadd(self.queue_name, {task.id: score})
 
-        # Publish submission event
         await self._client.publish("hermes:tasks:events", json.dumps({
             "event": "task_submitted",
             "task_id": task.id,
@@ -172,11 +324,10 @@ class TaskQueue:
         return task.id
 
     async def dequeue(self, timeout: int = 5) -> Optional[Task]:
-        """
-        Pop the highest-priority task from the queue.
+        """Pop the highest-priority task from the queue."""
+        if self._degraded:
+            return await self._fallback.dequeue(timeout)
 
-        Uses ZPOPMIN for atomic dequeue of the lowest-score (highest-priority) item.
-        """
         if not self._client:
             await self.connect()
 
@@ -200,6 +351,9 @@ class TaskQueue:
 
     async def complete(self, task: Task, result: str = ""):
         """Mark a task as completed with an optional result string."""
+        if self._degraded:
+            return await self._fallback.complete(task, result)
+
         task.status = TaskStatus.COMPLETED
         task.completed_at = time.time()
         task.result = result
@@ -209,17 +363,16 @@ class TaskQueue:
         await self._publish_event("task_completed", task)
 
     async def fail(self, task: Task, error: str):
-        """
-        Mark a task as failed. Retries if retries remain,
-        otherwise marks as permanently failed.
-        """
+        """Mark a task as failed. Retries if retries remain."""
+        if self._degraded:
+            return await self._fallback.fail(task, error)
+
         task.retries += 1
         if task.retries < task.max_retries:
             task.status = TaskStatus.RETRYING
             task.error = error
             await self._update_status(task)
             await self._publish_event("task_retrying", task)
-            # Re-queue with exponential backoff delay
             await asyncio.sleep(min(60, task.retries * 5))
             task.status = TaskStatus.PENDING
             await self.submit(task)
@@ -233,6 +386,9 @@ class TaskQueue:
 
     async def cancel(self, task_id: str) -> bool:
         """Cancel a pending task by removing it from the queue."""
+        if self._degraded:
+            return await self._fallback.cancel(task_id)
+
         if not self._client:
             return False
         removed = await self._client.zrem(self.queue_name, task_id)
@@ -245,6 +401,9 @@ class TaskQueue:
 
     async def get_status(self, task_id: str) -> Optional[Dict[str, Any]]:
         """Get current status of a task."""
+        if self._degraded:
+            return await self._fallback.get_status(task_id)
+
         if not self._client:
             await self.connect()
         data = await self._client.hgetall(f"{self.status_prefix}{task_id}")
@@ -252,6 +411,9 @@ class TaskQueue:
 
     async def update_progress(self, task: Task, progress: float, message: str = ""):
         """Update task progress (0.0 to 1.0) with optional message."""
+        if self._degraded:
+            return await self._fallback.update_progress(task, progress, message)
+
         task.progress = min(1.0, max(0.0, progress))
         task.progress_message = message
         if self._client:
@@ -265,7 +427,10 @@ class TaskQueue:
             await self._publish_event("task_progress", task)
 
     async def get_queue_stats(self) -> Dict[str, Any]:
-        """Get queue statistics including pending count and recent completions."""
+        """Get queue statistics."""
+        if self._degraded:
+            return await self._fallback.get_queue_stats()
+
         if not self._client:
             await self.connect()
         pending = await self._client.zcard(self.queue_name)
@@ -277,6 +442,9 @@ class TaskQueue:
 
     async def get_pending_tasks(self, limit: int = 20) -> List[Dict[str, Any]]:
         """Get list of pending tasks with their priorities."""
+        if self._degraded:
+            return await self._fallback.get_pending_tasks(limit)
+
         if not self._client:
             await self.connect()
         items = await self._client.zrange(
@@ -293,6 +461,11 @@ class TaskQueue:
                     "progress": status.get("progress", "0"),
                 })
         return tasks
+
+    @property
+    def is_degraded(self) -> bool:
+        """True when running without Redis (in-memory fallback active)."""
+        return self._degraded
 
     async def _update_status(self, task: Task):
         """Update task status in Redis."""
@@ -350,12 +523,7 @@ class WorkerPool:
         self._active_tasks: Dict[str, Task] = {}
 
     def register_skill(self, skill_name: str, handler: Callable):
-        """
-        Register a skill handler function.
-
-        The handler should be an async callable that accepts a Task
-        and returns a result string.
-        """
+        """Register a skill handler function."""
         self._skill_handlers[skill_name] = handler
 
     async def start(self):
@@ -366,13 +534,14 @@ class WorkerPool:
             asyncio.create_task(self._worker_loop(i))
             for i in range(self.num_workers)
         ]
+        degraded = " [in-memory fallback]" if self.queue.is_degraded else ""
         print(
-            f"[task_engine] Worker pool started: {self.num_workers} workers",
+            f"[task_engine] Worker pool started: {self.num_workers} workers{degraded}",
             flush=True,
         )
 
     async def stop(self):
-        """Stop all workers gracefully, waiting for current tasks to finish."""
+        """Stop all workers gracefully."""
         self._running = False
         for worker in self._workers:
             worker.cancel()
@@ -503,7 +672,13 @@ class StatusStreamer:
             return
 
         self._running = True
-        client = aioredis.from_url(self.redis_url, decode_responses=True)
+        try:
+            client = aioredis.from_url(self.redis_url, decode_responses=True)
+            await client.ping()
+        except Exception as exc:
+            print(f"[streamer] Redis unavailable ({exc}) - status streaming disabled", flush=True)
+            return
+
         pubsub = client.pubsub()
         await pubsub.subscribe("hermes:tasks:events")
 
@@ -530,7 +705,6 @@ class StatusStreamer:
         """Format and send task event to Telegram."""
         event_type = event.get("event", "")
         task_name = event.get("name", "unknown")
-        task_id = event.get("task_id", "")
 
         if event_type == "task_submitted":
             msg = f"[QUEUED] {task_name}"
