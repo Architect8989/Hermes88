@@ -403,8 +403,14 @@ class SwarmCoordinator:
             subtask.status = "completed" if proc.returncode == 0 else "failed"
 
         except FileNotFoundError:
-            # jcode not available, use direct LLM approach
-            subtask.status = await self._execute_via_llm(subtask, prompt)
+            # jcode binary is required — do not reimplement it
+            subtask.status = "failed"
+            subtask.error = (
+                "jcode binary not found. "
+                "Install the real jcode (github.com/1jehuang/jcode): "
+                "cargo install jcode"
+            )
+            print(f"[coordinator] {subtask.error}", flush=True)
 
         except asyncio.TimeoutError:
             subtask.status = "failed"
@@ -434,77 +440,6 @@ class SwarmCoordinator:
         )
         if subtask.status == "failed" and subtask.error:
             print(f"  Error: {subtask.error[:100]}", flush=True)
-
-    async def _execute_via_llm(self, subtask: SubTask, prompt: str) -> str:
-        """Execute a subtask directly via LLM API when jcode unavailable."""
-        system = (
-            "You are a coding agent. Execute the task described below.\n"
-            "Write your changes as:\n"
-            "# FILE: path/to/file.ext\n<contents>\n\n"
-            "Write complete files (not patches).\n"
-        )
-
-        # Read target files for context
-        context = ""
-        workdir = Path(self.workdir)
-        for fname in subtask.target_files[:5]:
-            fpath = workdir / fname
-            if fpath.exists():
-                try:
-                    content = fpath.read_text(errors="replace")[:3000]
-                    context += f"\n# CURRENT FILE: {fname}\n{content}\n"
-                except Exception:
-                    pass
-
-        full_prompt = f"TASK: {prompt}\n\nCURRENT CODE:{context}"
-        response = self._call_llm(
-            system + "\n\nRespond with ONLY file contents.",
-            msg=full_prompt,
-        )
-
-        if not response:
-            subtask.error = "LLM returned no response"
-            return "failed"
-
-        # Write files from response
-        import re
-        file_pattern = re.compile(r"^#\s*FILE:\s*(.+)$")
-        files_written = []
-        current_file = None
-        current_lines = []
-
-        for line in response.split("\n"):
-            m = file_pattern.match(line)
-            if m:
-                if current_file:
-                    self._write_file(current_file, current_lines)
-                    files_written.append(current_file)
-                current_file = m.group(1).strip()
-                current_lines = []
-            elif current_file is not None:
-                current_lines.append(line)
-
-        if current_file:
-            self._write_file(current_file, current_lines)
-            files_written.append(current_file)
-
-        if files_written:
-            subtask.output = f"Wrote {len(files_written)} files: {', '.join(files_written[:5])}"
-            return "completed"
-        else:
-            subtask.error = "No files written from LLM response"
-            return "failed"
-
-    def _write_file(self, path: str, lines: list):
-        """Write a file to the workdir."""
-        clean_path = path.lstrip("/").lstrip("./")
-        if ".." in clean_path:
-            return
-
-        fpath = Path(self.workdir) / clean_path
-        fpath.parent.mkdir(parents=True, exist_ok=True)
-        content = "\n".join(lines).rstrip() + "\n"
-        fpath.write_text(content)
 
     async def _merge_results(self) -> bool:
         """Check for file conflicts and resolve them."""
