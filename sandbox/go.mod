@@ -1,11 +1,10 @@
 module github.com/Architect8989/Hermes88/sandbox
 
-go 1.21
+go 1.25.0
 
 require (
 	github.com/docker/docker v24.0.0+incompatible
 	github.com/docker/go-connections v0.4.0
-	github.com/opencontainers/image-spec v1.1.0-rc4
 )
 
 require (
@@ -16,7 +15,13 @@ require (
 	github.com/moby/term v0.5.0 // indirect
 	github.com/morikuni/aec v1.0.0 // indirect
 	github.com/opencontainers/go-digest v1.0.0 // indirect
-	github.com/pkg/errors v0.9.0 // indirect
+	github.com/opencontainers/image-spec v1.1.1 // indirect
+	github.com/pkg/errors v0.9.1 // indirect
+	github.com/stretchr/testify v1.11.1 // indirect
+	golang.org/x/mod v0.12.0 // indirect
 	golang.org/x/net v0.17.0 // indirect
 	golang.org/x/sys v0.13.0 // indirect
+	golang.org/x/time v0.15.0 // indirect
+	golang.org/x/tools v0.13.0 // indirect
+	gotest.tools/v3 v3.5.2 // indirect
 )
