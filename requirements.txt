@@ -50,7 +50,7 @@ pdfminer.six>=20221105
 pillow>=10.0.0
 
 # ── Web search (zero-API-key fallback) ────────────────────────────────────────
-duckduckgo-search>=6.0.0
+duckduckgo-search>=8.1.1
 
 # ── Data (Redis client, SQLite utilities) ─────────────────────────────────────
 redis[hiredis]>=5.0.0
