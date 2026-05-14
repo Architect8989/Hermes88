@@ -130,6 +130,7 @@ class AgentServiceServicer(openclaude_pb2_grpc.AgentServiceServicer):
             f"workdir={workdir} yolo={yolo}"
         )
 
+        proc = None
         try:
             proc = subprocess.Popen(
                 cmd,
@@ -139,10 +140,16 @@ class AgentServiceServicer(openclaude_pb2_grpc.AgentServiceServicer):
                 bufsize=1,
             )
             for line in proc.stdout:
+                # Check if client has disconnected — kill subprocess if so
+                if not context.is_active():
+                    logger.info("[server] Client disconnected — killing openclaude subprocess")
+                    proc.kill()
+                    proc.wait(timeout=5)
+                    return
                 yield openclaude_pb2.ServerMessage(
                     text_chunk=openclaude_pb2.TextChunk(text=line)
                 )
-            proc.wait()
+            proc.wait(timeout=30)
             if proc.returncode != 0:
                 yield openclaude_pb2.ServerMessage(
                     error=openclaude_pb2.ErrorResponse(
@@ -151,6 +158,9 @@ class AgentServiceServicer(openclaude_pb2_grpc.AgentServiceServicer):
                 )
                 return
         except Exception as exc:
+            if proc and proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
             yield openclaude_pb2.ServerMessage(
                 error=openclaude_pb2.ErrorResponse(message=str(exc))
             )

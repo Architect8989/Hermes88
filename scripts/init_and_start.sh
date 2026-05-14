@@ -1,6 +1,28 @@
 #!/bin/bash
 # ─────────────────────────────────────────────────────────────────────────────
-# init_and_start.sh — v4.2 Full Integration Bootstrap
+# init_and_start.sh — v4.3 Full Integration Bootstrap
+#
+# IMPORTANT — Error Handling Policy:
+#   This script uses `set -e` (exit on first error) combined with `|| true`
+#   and `|| echo` fallbacks on NON-CRITICAL commands. This is intentional:
+#   the system is designed for graceful degradation. If openclaw, jcode, or
+#   MCP servers fail to configure, Hermes still starts with hermes-agent alone.
+#
+#   Commands that use `|| true` or `|| echo` are explicitly non-fatal:
+#     - openclaw config set (openclaw is optional, disabled by default)
+#     - openclaw doctor --fix (cosmetic)
+#     - jcode session prewarm (optimization, not required)
+#     - MCP YAML injection (hermes-agent works without MCP)
+#
+#   Commands that MUST succeed (no fallback):
+#     - Secret validation (TELEGRAM_BOT_TOKEN, DO_INFERENCE_API_KEY, GITHUB_PAT)
+#     - /data/.hermes/.env creation
+#     - config.yaml and gateway.yaml template expansion
+#     - supervisord exec (final CMD)
+#
+# What changed from v4.2 → v4.3:
+#   FIX-8  HERMES_YOLO_MODE now defaults to 0 (safe). Override via env var.
+#   FIX-9  Documented || true patterns and error handling policy (this header).
 #
 # What changed from v4.1 → v4.2:
 #   FIX-5  gateway.yaml and config.yaml were copied verbatim with cp, leaving
@@ -94,7 +116,11 @@ export OPENAI_API_KEY="${DO_INFERENCE_API_KEY}"
 export OPENAI_BASE_URL="${DO_BASE_URL}"
 export OPENAI_MODEL="${OPENCLAUDE_MODEL_VAL}"
 export CLAUDE_CODE_USE_OPENAI=1
-export HERMES_YOLO_MODE=1
+# SECURITY: HERMES_YOLO_MODE=0 (safe default) — openclaude uses --permission-mode plan (read-only).
+# Set to 1 ONLY if you have implemented the ActionRequired approval loop via Telegram
+# inline buttons, or you fully trust the LLM's judgment on the target repos.
+# See skills/openclaude_grpc/server.py for the full safety model.
+export HERMES_YOLO_MODE="${HERMES_YOLO_MODE:-0}"
 export HERMES_HOME=/data/.hermes
 export HERMES_GATEWAY_CONFIG="/data/.hermes/gateway.yaml"
 export HF_TOKEN="${HF_TOKEN:-}"
@@ -141,7 +167,7 @@ lines = [
     f"OPENAI_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
     f"OPENAI_MODEL={os.environ['OPENCLAUDE_MODEL']}",
     f"CLAUDE_CODE_USE_OPENAI=1",
-    f"HERMES_YOLO_MODE=1",
+    f"HERMES_YOLO_MODE={os.environ.get('HERMES_YOLO_MODE', '0')}",
     f"HERMES_GATEWAY_CONFIG=/data/.hermes/gateway.yaml",
     f"TELEGRAM_BOT_TOKEN={os.environ['TELEGRAM_BOT_TOKEN']}",
     f"TELEGRAM_CHAT_ID={telegram_chat_id}",

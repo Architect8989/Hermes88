@@ -179,10 +179,11 @@ export async function publishEvent(channel: string, event: HermesEvent): Promise
       subscribers,
     });
 
-    // Also store in a Redis list for persistence (last 1000 events)
+    // Also store in a Redis list for persistence (last 1000 events, 24h TTL)
     const listKey = `${channel}:history`;
     await client.lpush(listKey, serialized);
     await client.ltrim(listKey, 0, 999);
+    await client.expire(listKey, 86400); // 24 hour TTL on event history
 
     return subscribers;
   } catch (err) {

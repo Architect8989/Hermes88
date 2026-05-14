@@ -15,30 +15,36 @@ from pathlib import Path
 async def spawn_worker(repo: str, task: str, idx: int) -> tuple[int, str]:
     """Spawn one jcode worker for a single repo. Returns (returncode, output)."""
     import tempfile
+    import shutil
     workdir = tempfile.mkdtemp(prefix=f"swarm_{idx}_")
 
-    # Clone the repo
-    clone = await asyncio.create_subprocess_exec(
-        "git", "clone", "--depth", "1", repo, workdir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    _, clone_stderr = await clone.communicate()
-    if clone.returncode != 0:
-        return clone.returncode, f"git clone failed: {clone_stderr.decode()}"
+    try:
+        # Clone the repo with --no-hardlinks to prevent inode sharing between workers.
+        # Without this flag, local file:// clones share inodes and workers corrupt each other.
+        clone = await asyncio.create_subprocess_exec(
+            "git", "clone", "--depth", "1", "--no-hardlinks", repo, workdir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, clone_stderr = await clone.communicate()
+        if clone.returncode != 0:
+            return clone.returncode, f"git clone failed: {clone_stderr.decode()}"
 
-    # Spawn jcode worker (connects to running jcode server at :7865)
-    proc = await asyncio.create_subprocess_exec(
-        "jcode", "run",
-        "--message", f"{task}\nRepo: {repo}\nWorkdir: {workdir}",
-        "--non-interactive",
-        cwd=workdir,
-        stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.PIPE,
-    )
-    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
-    output = (stdout or b"").decode() + (stderr or b"").decode()
-    return proc.returncode, output
+        # Spawn jcode worker (connects to running jcode server at :7865)
+        proc = await asyncio.create_subprocess_exec(
+            "jcode", "run",
+            "--message", f"{task}\nRepo: {repo}\nWorkdir: {workdir}",
+            "--non-interactive",
+            cwd=workdir,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=1800)
+        output = (stdout or b"").decode() + (stderr or b"").decode()
+        return proc.returncode, output
+    finally:
+        # Always clean up the temporary workdir to prevent disk exhaustion
+        shutil.rmtree(workdir, ignore_errors=True)
 
 
 async def main(repos: list[str], task: str, max_workers: int):

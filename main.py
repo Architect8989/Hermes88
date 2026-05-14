@@ -51,24 +51,18 @@ def _build_env() -> dict:
 
 
 def _start_with_cli(env: dict) -> int:
-    """Start hermes-agent via its installed CLI entry point."""
-    return subprocess.run(["hermes-agent"], env=env).returncode
-
-
-def _start_with_module(env: dict) -> int:
-    """Start hermes-agent via python -m gateway.run (hermes-agent's own gateway module)."""
-    return subprocess.run(
-        [sys.executable, "-m", "gateway.run"], env=env
-    ).returncode
+    """Start hermes-agent via its installed CLI entry point (`hermes` binary)."""
+    import shutil
+    binary = shutil.which("hermes") or shutil.which("hermes-agent")
+    return subprocess.run([binary], env=env).returncode
 
 
 def _start_with_gateway(env: dict) -> int:
     """
-    Start the built-in Telegram gateway (gateway/run.py).
-    This is the self-contained fallback when hermes-agent is not installed.
-    gateway/run.py is the production-ready gateway: python-telegram-bot polling
-    loop + AsyncOpenAI calling DO Inference, file-delivery via %%FILE:%% tags,
-    chat-ID whitelist, and per-user conversation history.
+    Start the gateway via python -m gateway.run.
+    Used both when hermes-agent's gateway module is available and as
+    the self-contained fallback. gateway/run.py handles dispatch to
+    hermes or openclaw based on HERMES_GATEWAY env var.
     """
     return subprocess.run(
         [sys.executable, "-m", "gateway.run"], env=env
@@ -99,25 +93,19 @@ def main() -> None:
     #   2. python3 -m gateway.run  (hermes-agent gateway module — same package)
     #   3. python -m gateway.run   (built-in gateway fallback — always available)
     import shutil
-    if shutil.which("hermes-agent"):
+    if shutil.which("hermes-agent") or shutil.which("hermes"):
         start_fn = _start_with_cli
-        method_name = "hermes-agent CLI"
+        method_name = "hermes CLI"
     else:
-        try:
-            import importlib
-            importlib.import_module("hermes_cli")
-            start_fn = _start_with_module
-            method_name = "python -m gateway.run"
-        except ImportError:
-            # hermes-agent not installed — fall back to the built-in gateway.
-            # gateway/run.py is production-ready: python-telegram-bot + openai + DO Inference.
-            print(
-                "[main] hermes-agent not installed — falling back to built-in gateway.run. "
-                "Install hermes-agent to enable the terminal tool, skills, memory and cron.",
-                file=sys.stderr,
-            )
-            start_fn = _start_with_gateway
-            method_name = "python -m gateway.run (built-in fallback)"
+        # hermes-agent not installed — use the built-in gateway dispatcher.
+        # gateway/run.py dispatches to hermes or openclaw based on HERMES_GATEWAY env.
+        print(
+            "[main] hermes-agent not installed — using built-in gateway/run.py dispatcher. "
+            "Install hermes-agent to enable the terminal tool, skills, memory and cron.",
+            file=sys.stderr,
+        )
+        start_fn = _start_with_gateway
+        method_name = "python -m gateway.run (built-in dispatcher)"
 
     print(f"[main] Using start method: {method_name}")
 

@@ -20,6 +20,9 @@ export function generateEventId(): string {
 }
 
 // ─── Metrics Store ───────────────────────────────────────────────────────────
+// NOTE: Metrics are in-memory only and reset on server restart.
+// For persistent metrics across restarts, consider writing to Redis
+// (e.g., HINCRBY hermes:webhook:metrics events_received 1).
 
 const metrics = {
   events_received: 0,

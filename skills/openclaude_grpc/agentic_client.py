@@ -4,6 +4,12 @@ OpenClaude Agentic Client -- Peak Implementation.
 Transforms the single-shot gRPC client into a true agentic coding loop
 that iterates: plan -> edit -> verify -> self-correct.
 
+ARCHITECTURAL NOTE:
+  This client does NOT use the gRPC server (skills/openclaude_grpc/server.py).
+  It calls the DO Inference HTTP API directly for the plan/edit/verify loop.
+  Use client.py for single-shot gRPC tasks; use this file for multi-iteration
+  agentic tasks that require verify-and-retry semantics.
+
 This replaces the simple client.py for complex tasks that require
 multiple iterations to achieve a verifiable goal.
 

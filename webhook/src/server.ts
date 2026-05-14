@@ -136,9 +136,11 @@ app.post('/webhooks/github', (req: Request, res: Response) => {
   handleGitHubWebhook(req, res).catch((err: unknown) => {
     const error = err instanceof Error ? err : new Error(String(err));
     log('error', 'Unhandled error in GitHub webhook handler', { error: error.message });
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal server error' });
-    }
+    try {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    } catch { /* response already destroyed — nothing to do */ }
   });
 });
 
@@ -146,9 +148,11 @@ app.post('/webhooks/stripe', (req: Request, res: Response) => {
   handleStripeWebhook(req, res).catch((err: unknown) => {
     const error = err instanceof Error ? err : new Error(String(err));
     log('error', 'Unhandled error in Stripe webhook handler', { error: error.message });
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal server error' });
-    }
+    try {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    } catch { /* response already destroyed — nothing to do */ }
   });
 });
 
@@ -156,9 +160,11 @@ app.post('/webhooks/system', (req: Request, res: Response) => {
   handleSystemEvent(req, res).catch((err: unknown) => {
     const error = err instanceof Error ? err : new Error(String(err));
     log('error', 'Unhandled error in system event handler', { error: error.message });
-    if (!res.headersSent) {
-      res.status(500).json({ error: 'Internal server error' });
-    }
+    try {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'Internal server error' });
+      }
+    } catch { /* response already destroyed — nothing to do */ }
   });
 });
 

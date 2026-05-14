@@ -203,12 +203,26 @@ def run_bounded(
 
     while strikes < max_strikes:
         try:
+            # Use start_new_session=True so the shell and ALL its children
+            # form a new process group. On timeout, os.killpg kills the entire tree.
             result = subprocess.run(
                 cmd, shell=True, cwd=workdir,
                 capture_output=True, text=True,
                 timeout=per_strike_timeout,   # FIX-F: was hardcoded 1200
+                start_new_session=True,       # FIX-16: enables process group kill
             )
-        except subprocess.TimeoutExpired:
+        except subprocess.TimeoutExpired as te:
+            # Kill the entire process group (shell + children) on timeout
+            import signal
+            if hasattr(te, 'args') and te.args:
+                pass  # subprocess.run already killed the direct child
+            try:
+                import os as _os
+                # The process group ID equals the PID of the session leader (the shell)
+                # subprocess.run with start_new_session=True guarantees pgid == child pid
+                _os.killpg(_os.getpgid(0), signal.SIGKILL)
+            except (ProcessLookupError, PermissionError, OSError):
+                pass  # Process already dead or we don't own it
             strikes += 1
             last_stderr = (
                 f"[bounded-run] Command timed out after {per_strike_timeout}s "
@@ -472,7 +486,14 @@ def _push_github_layer1_local_git(
                 git's reflog, process list, and any push error messages.
                 Now uses git credential.helper subprocess so the token only
                 ever travels over the HTTPS connection, not in argv or logs.
+    FIX-10: Pre-cleanup removes stale credential.helper from prior unclean shutdown
+            (SIGKILL scenario where finally block never executed).
     """
+    # Pre-cleanup: remove any stale credential.helper left by a prior SIGKILL
+    subprocess.run(
+        ["git", "config", "--unset", "credential.helper"],
+        cwd=workdir, capture_output=True,
+    )
     try:
         # Point origin at the clean (no-token) URL
         subprocess.run(
@@ -533,16 +554,15 @@ def _push_github_layer1_local_git(
 
         print(f"[push-gh-L1] All push retries exhausted: {last_push_err}", file=sys.stderr)
         return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(f"[push-gh-L1] Failed: {type(e).__name__}", file=sys.stderr)
+        return None
     finally:
         # Always clean up the credential helper regardless of push outcome
         subprocess.run(
             ["git", "config", "--unset", "credential.helper"],
             cwd=workdir, capture_output=True,
         )
-
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        print(f"[push-gh-L1] Failed: {type(e).__name__}", file=sys.stderr)
-        return None
 
 
 def _push_github_layer2_api_python(
