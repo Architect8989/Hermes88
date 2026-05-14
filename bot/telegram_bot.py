@@ -533,16 +533,15 @@ def _push_github_layer1_local_git(
 
         print(f"[push-gh-L1] All push retries exhausted: {last_push_err}", file=sys.stderr)
         return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
+        print(f"[push-gh-L1] Failed: {type(e).__name__}", file=sys.stderr)
+        return None
     finally:
         # Always clean up the credential helper regardless of push outcome
         subprocess.run(
             ["git", "config", "--unset", "credential.helper"],
             cwd=workdir, capture_output=True,
         )
-
-    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
-        print(f"[push-gh-L1] Failed: {type(e).__name__}", file=sys.stderr)
-        return None
 
 
 def _push_github_layer2_api_python(
