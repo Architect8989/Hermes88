@@ -42,7 +42,7 @@ httpx>=0.27.0
 python-telegram-bot>=20.7
 
 # ── HuggingFace integration ───────────────────────────────────────────────────
-huggingface_hub>=0.21.0
+huggingface_hub>=1.14.0
 
 # ── Media / document ingestion ────────────────────────────────────────────────
 PyMuPDF>=1.23.0
