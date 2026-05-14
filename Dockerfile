@@ -60,14 +60,14 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
 
 # ─────────────────────────────────────────────────────────────────────────────
 # ── Agent 1: HERMES-AGENT ────────────────────────────────────────────────────
-# Install with [messaging] extra to ensure python-telegram-bot is included in
-# hermes-agent's own dependency set (fixes "python-telegram-bot not installed"
-# warning that prevents the built-in Telegram adapter from loading).
-# FIX-E  hermes-agent now installed with [messaging] extra so its internal
-#         Telegram adapter can import python-telegram-bot successfully.
-RUN pip3 install --no-cache-dir "hermes-agent[messaging]>=0.10.0" \
-    || pip3 install --no-cache-dir "hermes-agent>=0.10.0" \
-    || echo "[hermes-agent] PyPI package not available — built-in gateway.run will be used"
+# hermes-agent is NOT on PyPI. It must be installed from GitHub source.
+# If network access is unavailable at build time, the container will use
+# gateway/run.py as the fallback (requires HERMES_GATEWAY env var at runtime).
+RUN pip3 install --no-cache-dir \
+    "hermes-agent[messaging,pty,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git" \
+    && hermes --version \
+    && echo "[hermes-agent] installed from source — binary at $(which hermes)" \
+    || echo "[WARN] hermes-agent install failed (network unavailable?) — gateway/run.py fallback will be used at runtime"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Remaining Python dependencies — install from requirements.txt

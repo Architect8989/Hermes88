@@ -40,42 +40,18 @@ def _discover_chat_id() -> int:
     """
     Fall back to auto-discovering chat ID from recent updates.
     Only used when neither --chat-id nor TELEGRAM_CHAT_ID is set.
-    This is the source of the "random chat ID" problem if TELEGRAM_CHAT_ID
-    is not configured — whoever last messaged the bot becomes the target.
-    Set TELEGRAM_CHAT_ID in .env to avoid this entirely.
+
+    SECURITY: This is inherently unsafe in production. If no TELEGRAM_CHAT_ID
+    is configured, refuse to auto-discover to prevent sending files to random users.
     """
-    try:
-        r = requests.get(
-            f"{API_BASE}/getUpdates",
-            params={"limit": 50, "timeout": 5},
-            timeout=10,
-        )
-        data = r.json()
-        if not data.get("ok"):
-            _die(f"getUpdates failed: {data.get('description', data)}")
-        updates = data.get("result", [])
-        if not updates:
-            _die(
-                "No Telegram updates found. Send the bot at least one message first, "
-                "or set TELEGRAM_CHAT_ID env var."
-            )
-        for upd in reversed(updates):
-            msg = (
-                upd.get("message")
-                or upd.get("edited_message")
-                or upd.get("channel_post")
-            )
-            if msg and "chat" in msg:
-                chat_id = msg["chat"]["id"]
-                print(
-                    f"[send_file] Auto-discovered chat_id={chat_id} from recent update. "
-                    f"Set TELEGRAM_CHAT_ID={chat_id} in .env to avoid auto-discovery.",
-                    file=sys.stderr,
-                )
-                return chat_id
-        _die("getUpdates returned updates but none had a usable chat.id")
-    except requests.RequestException as exc:
-        _die(f"Network error during getUpdates: {exc}")
+    print(
+        "[send_file] FATAL: TELEGRAM_CHAT_ID is not set and --chat-id was not provided.\n"
+        "  Auto-discovery is disabled for security (files could be sent to any user).\n"
+        "  Set TELEGRAM_CHAT_ID in .env to your Telegram chat ID.\n"
+        "  Find it: message @userinfobot on Telegram.",
+        file=sys.stderr,
+    )
+    sys.exit(1)
 
 
 def resolve_chat_id(cli_chat_id: str | None) -> int:

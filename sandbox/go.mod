@@ -4,7 +4,6 @@ go 1.21
 
 require (
 	github.com/docker/docker v24.0.0+incompatible
-	github.com/docker/go-connections v0.4.0
 	github.com/opencontainers/image-spec v1.1.0-rc4
 )
 

@@ -42,7 +42,6 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/mount"
 	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 )
 
 // Global sandbox manager instance and Docker client.
@@ -103,14 +102,16 @@ func CreateSandbox(req SandboxRequest) (*SandboxResponse, error) {
 	}
 
 	// Check capacity - reject if at maximum concurrent sandboxes.
-	manager.mu.RLock()
+	// Hold write lock across the capacity check AND registration to prevent
+	// TOCTOU race where multiple goroutines pass the check simultaneously.
+	manager.mu.Lock()
 	activeCount := len(manager.sandboxes)
-	manager.mu.RUnlock()
-
 	if activeCount >= manager.config.MaxConcurrent {
+		manager.mu.Unlock()
 		return nil, fmt.Errorf("maximum concurrent sandboxes reached (%d/%d)",
 			activeCount, manager.config.MaxConcurrent)
 	}
+	manager.mu.Unlock()
 
 	// Determine effective timeout.
 	timeout := manager.config.DefaultTimeout
@@ -393,15 +394,18 @@ func enforceTimeout(sandboxID string, timeout time.Duration, ctx context.Context
 		// Timeout expired - force kill the sandbox.
 		log.Printf("[executor] Timeout expired for sandbox %s after %v", sandboxID, timeout)
 
-		manager.mu.RLock()
+		manager.mu.Lock()
 		sandbox, exists := manager.sandboxes[sandboxID]
-		manager.mu.RUnlock()
-
 		if !exists {
-			return // Already cleaned up.
+			manager.mu.Unlock()
+			return // Already cleaned up by KillSandbox or GetSandboxStatus.
 		}
+		// Remove from tracking under the lock to prevent KillSandbox from racing.
+		delete(manager.sandboxes, sandboxID)
+		sandbox.Cancel()
+		manager.mu.Unlock()
 
-		// Force kill the container.
+		// Force kill the container (safe to do outside lock — we own the reference).
 		killCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 
@@ -410,7 +414,6 @@ func enforceTimeout(sandboxID string, timeout time.Duration, ctx context.Context
 			Timeout: &stopTimeout,
 		})
 		removeContainer(sandbox.ContainerID)
-		cleanupTracking(sandboxID)
 
 		log.Printf("[executor] Sandbox %s killed due to timeout", sandboxID)
 
@@ -564,5 +567,4 @@ func intPtr(i int) *int          { return &i }
 
 // Ensure unused imports are referenced to prevent compile errors.
 // These are used in the full implementation but the compiler needs references.
-var _ = nat.Port("")
 var _ sync.Mutex

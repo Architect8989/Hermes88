@@ -101,8 +101,17 @@ def _start_hermes() -> None:
         cmd += ["--config", GATEWAY_YAML]
 
     print(f"[gateway] exec: {' '.join(cmd)}", flush=True)
-    os.execvpe(binary, cmd, os.environ)
-    # unreachable
+    try:
+        os.execvpe(binary, cmd, os.environ)
+    except OSError as e:
+        print(
+            f"\n[gateway] FATAL: os.execvpe failed: {e}\n"
+            f"  Binary: {binary}\n"
+            f"  Check file permissions and that the binary is a valid executable.\n",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
 
 
 def _start_openclaw() -> None:
@@ -133,13 +142,38 @@ def _start_openclaw() -> None:
     cmd  = [binary, "gateway", "--port", port, "--verbose"]
 
     print(f"[gateway] exec: {' '.join(cmd)}", flush=True)
-    os.execvpe(binary, cmd, os.environ)
-    # unreachable
+    try:
+        os.execvpe(binary, cmd, os.environ)
+    except OSError as e:
+        print(
+            f"\n[gateway] FATAL: os.execvpe failed: {e}\n"
+            f"  Binary: {binary}\n"
+            f"  Check file permissions and that the binary is a valid executable.\n",
+            file=sys.stderr,
+            flush=True,
+        )
+        sys.exit(1)
 
 
 def main() -> None:
     print(f"[gateway] HERMES_HOME={HERMES_HOME}", flush=True)
     print(f"[gateway] HERMES_GATEWAY={_GATEWAY}", flush=True)
+
+    # Safety check: detect unexpanded ${VAR} templates in gateway config
+    if os.path.exists(GATEWAY_YAML):
+        try:
+            with open(GATEWAY_YAML, "r") as f:
+                content = f.read(4096)
+            if "${" in content:
+                print(
+                    f"\n[gateway] WARNING: {GATEWAY_YAML} contains unexpanded template variables.\n"
+                    "  Run scripts/init_and_start.sh first to expand ${VAR} placeholders.\n"
+                    "  Continuing with potentially broken config...\n",
+                    file=sys.stderr,
+                    flush=True,
+                )
+        except Exception:
+            pass
 
     if _GATEWAY == "hermes":
         _start_hermes()
