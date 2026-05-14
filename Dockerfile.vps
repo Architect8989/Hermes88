@@ -150,14 +150,23 @@ RUN npm install -g @modelcontextprotocol/server-brave-search \
 WORKDIR /app
 COPY . /app/
 
-# ── Install jcode wrapper (Rhodawk DO Inference scaffolding CLI) ───────────────
-# scripts/jcode is a shell wrapper shipped in-repo (replaces broken upstream
-# install script). Placed at /usr/local/bin/jcode so supervisord + hermes-agent
-# can call `jcode run --message "..."` without any PATH changes.
-RUN cp /app/scripts/jcode /usr/local/bin/jcode \
+# ── Install jcode real binary from GitHub releases (1jehuang/jcode) ───────────
+RUN set -e; \
+    JCODE_VER=$(curl -s https://api.github.com/repos/1jehuang/jcode/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//'); \
+    echo "[jcode] Installing real binary v${JCODE_VER}"; \
+    curl -L "https://github.com/1jehuang/jcode/releases/download/v${JCODE_VER}/jcode-x86_64-unknown-linux-musl.tar.gz" \
+      | tar -xz -C /usr/local/bin/ \
     && chmod +x /usr/local/bin/jcode \
     && jcode --version \
-    && echo "[jcode] wrapper installed at $(which jcode)"
+    && echo "[jcode] real binary installed at $(which jcode)" \
+    || ( \
+      echo "[jcode] prebuilt binary unavailable — building from source"; \
+      curl https://sh.rustup.rs -sSf | sh -s -- -y --no-modify-path; \
+      /root/.cargo/bin/cargo install jcode; \
+      cp /root/.cargo/bin/jcode /usr/local/bin/jcode; \
+      jcode --version; \
+      echo "[jcode] built from source OK"; \
+    )
 
 # ── Generate OpenClaude gRPC Python stubs from proto ──────────────────────────
 # Proto source: openclaude_grpc/openclaude.proto (top-level dir, shipped in-repo)

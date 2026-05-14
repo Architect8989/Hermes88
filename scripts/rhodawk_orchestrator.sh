@@ -14,7 +14,7 @@ set -euo pipefail
 # -- Configuration -------------------------------------------------------------
 
 REDIS_URL="${REDIS_URL:-redis://localhost:6379/0}"
-REDIS_HOST="${REDIS_HOST:-localhost}"
+REDIS_HOST="${REDIS_HOST:-redis}"
 REDIS_PORT="${REDIS_PORT:-6379}"
 MEMORY_DB="${MEMORY_DB_PATH:-/data/.hermes/memory.db}"
 VAULT_PATH="${OBSIDIAN_VAULT_PATH:-/data/.hermes/obsidian-vault}"

@@ -8,5 +8,7 @@ task: |
   COMPLETED=$(wc -l < /data/completed_repos.txt 2>/dev/null || echo 0)
   echo "RHODAWK WEEKLY — $(date +%Y-%m-%d)"
   echo "Repos processed: $COMPLETED"
-  echo "PRs opened this week: $(git -C /tmp/repos log --oneline --since='1 week ago' 2>/dev/null | wc -l)"
+  echo "PRs opened this week: $(curl -s -H "Authorization: token ${GITHUB_PAT}" \
+  "https://api.github.com/repos/Architect8989/Hermes88/commits?since=$(date -u -d '7 days ago' '+%Y-%m-%dT%H:%M:%SZ')&per_page=100" \
+  | python3 -c "import json,sys; data=json.load(sys.stdin); print(f'Commits this week: {len(data) if isinstance(data, list) else 0}')")"
   echo "Active target list: $(wc -l < /data/target_list.json 2>/dev/null || echo unknown) repos"

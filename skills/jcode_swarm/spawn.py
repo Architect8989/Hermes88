@@ -6,6 +6,7 @@ jcode serve (running on :7865) coordinates conflict resolution automatically.
 import argparse
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
 from pathlib import Path
@@ -13,8 +14,8 @@ from pathlib import Path
 
 async def spawn_worker(repo: str, task: str, idx: int) -> tuple[int, str]:
     """Spawn one jcode worker for a single repo. Returns (returncode, output)."""
-    workdir = f"/tmp/swarm_{idx}"
-    Path(workdir).mkdir(parents=True, exist_ok=True)
+    import tempfile
+    workdir = tempfile.mkdtemp(prefix=f"swarm_{idx}_")
 
     # Clone the repo
     clone = await asyncio.create_subprocess_exec(
@@ -22,7 +23,9 @@ async def spawn_worker(repo: str, task: str, idx: int) -> tuple[int, str]:
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE,
     )
-    await clone.communicate()
+    _, clone_stderr = await clone.communicate()
+    if clone.returncode != 0:
+        return clone.returncode, f"git clone failed: {clone_stderr.decode()}"
 
     # Spawn jcode worker (connects to running jcode server at :7865)
     proc = await asyncio.create_subprocess_exec(

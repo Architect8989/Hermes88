@@ -68,6 +68,9 @@ bandit>=1.7.0
 safety>=3.0.0
 semgrep>=1.0.0
 
+# ── YAML parsing (MCP tool loader, config expansion) ──────────────────────────
+pyyaml>=6.0.0
+
 # ── Build utilities ────────────────────────────────────────────────────────────
 setuptools>=69.0.0
 wheel>=0.43.0

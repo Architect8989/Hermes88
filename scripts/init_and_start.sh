@@ -543,24 +543,6 @@ mkdir -p /data/.hermes/skills/_learned
 echo "[layer-e] Skill engine ready: /data/.hermes/skills/_learned/"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Layer F: Initialize operator model database tables
-# ─────────────────────────────────────────────────────────────────────────────
-echo "[layer-f] Initializing operator model schema..."
-python3 - << 'PYEOF'
-import sys
-sys.path.insert(0, '/app')
-try:
-    from rhodawk_core.operator_model import _ensure_schema
-    from pathlib import Path
-    db_path = Path("/data/.hermes/sessions/conversations.db")
-    db_path.parent.mkdir(parents=True, exist_ok=True)
-    _ensure_schema(db_path)
-    print("[layer-f] Operator model schema initialized")
-except Exception as exc:
-    print(f"[layer-f] Schema init skipped: {exc}")
-PYEOF
-
-# ─────────────────────────────────────────────────────────────────────────────
 # Layer H: Create image output directory
 # ─────────────────────────────────────────────────────────────────────────────
 mkdir -p /data/.hermes/images /data/.hermes/screenshots
