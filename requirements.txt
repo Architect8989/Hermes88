@@ -60,7 +60,7 @@ sqlite-utils>=3.35.0
 feedparser>=6.0.0
 
 # ── Web framework (internal health/API endpoints) ─────────────────────────────
-fastapi>=0.109.0
+fastapi>=0.136.1
 uvicorn[standard]>=0.27.0
 
 # ── Security scanning (skills/security-audit) ────────────────────────────────
