@@ -65,7 +65,7 @@ uvicorn[standard]>=0.27.0
 
 # ── Security scanning (skills/security-audit) ────────────────────────────────
 bandit>=1.7.0
-safety>=3.0.0
+safety>=3.7.0
 semgrep>=1.0.0
 
 # ── Build utilities ────────────────────────────────────────────────────────────
