@@ -123,23 +123,31 @@ services:
         max-file: "3"
 
   # ---------------------------------------------------------------------------
-  # CAMOFOX - Headless browser automation
-  # Provides: stealth browsing, page rendering, screenshot capture
+  # CAMOFOX - Anti-detection stealth browser (Camoufox Firefox, C++ patched)
+  # Provides: stealth browsing, accessibility snapshots, page extraction,
+  #           screenshot capture, YouTube transcripts, search macros
+  #
+  # Built from Dockerfile.camofox — clones jo-inc/camofox-browser from source,
+  # installs camoufox-js (which bundles its own patched Firefox at build time),
+  # and starts the REST API server at port 9377.
+  #
+  # IMPORTANT: do NOT set PUPPETEER_EXECUTABLE_PATH here. camoufox-js manages
+  # its own patched Firefox binary (downloaded by camoufox-js postinstall).
+  # Overriding this with Chromium disables the C++ fingerprint spoofing that
+  # makes Camoufox undetectable by Cloudflare and other bot detection systems.
   # ---------------------------------------------------------------------------
   camofox:
-    image: node:20-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.camofox
+    image: rhodawk-camofox:peak
+    pull_policy: never
     container_name: hermes-camofox
-    working_dir: /app
-    command: >
-      bash -c "apt-get update -q && apt-get install -y -q git chromium &&
-               git clone --depth 1 https://github.com/jo-inc/camofox-browser . &&
-               npm install && npm start"
     ports:
       - "9377:9377"
     environment:
       - CAMOFOX_ACCESS_KEY=${CAMOFOX_ACCESS_KEY}
       - CAMOFOX_PORT=9377
-      - PUPPETEER_EXECUTABLE_PATH=/usr/bin/chromium
     volumes:
       - camofox-data:/home/node/.camofox
     restart: unless-stopped
@@ -152,7 +160,7 @@ services:
       interval: 30s
       timeout: 10s
       retries: 3
-      start_period: 120s
+      start_period: 60s
     networks:
       - hermes-net
     logging:

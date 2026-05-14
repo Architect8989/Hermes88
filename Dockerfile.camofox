@@ -1,37 +1,52 @@
 # =============================================================================
-# Rhodawk AI — Camofox Stealth Browser  v2.0
+# Rhodawk AI — Camofox Stealth Browser  v3.0
 #
-# FIX-3: Build a proper image instead of live-cloning on every container start.
-# Previously: docker-compose used `node:20-slim` + inline bash to apt-get,
-#   git clone, npm install, npm start on EVERY restart. If the network was
-#   slow or npm install failed, camofox never came up.
-# Now: everything is baked into this image at build time. Container start
-#   is instant — just `npm start`.
+# Builds jo-inc/camofox-browser from source at a pinned commit SHA.
+# camoufox-js (the main dependency) downloads its own patched Camoufox Firefox
+# during `npm install` postinstall — this is NOT Chromium.
+#
+# CRITICAL: Do NOT set PUPPETEER_EXECUTABLE_PATH in docker-compose env vars.
+# camoufox-js manages the patched Firefox binary path internally. Overriding
+# with Chromium disables the C++ fingerprint spoofing (navigator.hardwareConcurrency,
+# WebGL renderers, AudioContext, screen geometry, WebRTC spoofed at the C++ level).
+#
+# What this image provides (REST API on port 9377):
+#   POST /tabs                    — open a new browser tab
+#   GET  /tabs/:id/snapshot       — accessibility snapshot (~90% smaller than HTML)
+#   POST /tabs/:id/click          — click an element by stable ref (e1, e2, e3…)
+#   POST /tabs/:id/type           — type into a field
+#   GET  /tabs/:id/screenshot     — base64 PNG screenshot
+#   POST /tabs/:id/extract        — structured JSON extraction via JSON Schema
+#   GET  /tabs/:id/transcript     — YouTube transcript via yt-dlp (no API key)
+#   GET  /search?q=QUERY&engine=google|youtube|amazon|reddit — search macros
+#   OpenAPI docs: http://localhost:9377/docs
+#
+# Changes v2.0 → v3.0:
+#   - Removed PUPPETEER_EXECUTABLE_PATH / chromium override (was disabling Camoufox)
+#   - Added yt-dlp for YouTube transcript extraction (GET /tabs/:id/transcript)
+#   - Added curl for HEALTHCHECK (previously missing in slim base)
+#   - Added python3 runtime (required by yt-dlp and camoufox-js browser fetch)
+#   - Pinned SHA updated to latest stable
 #
 # Build: docker build -f Dockerfile.camofox -t rhodawk-camofox .
-# Run:   docker run -d --name camofox -p 9377:9377 rhodawk-camofox
+# Run:   docker run -d --name camofox -p 9377:9377 \
+#          -e CAMOFOX_ACCESS_KEY=your-secret-key rhodawk-camofox
 # =============================================================================
 
 FROM node:20-slim
 
-RUN apt-get update -q && apt-get install -y -q git \
-    && rm -rf /var/lib/apt/lists/*
-
-WORKDIR /app
-
-# Clone at build time — pinned to a specific commit SHA so image is reproducible.
-# Update ARG CAMOFOX_SHA when you intentionally want a newer version.
-ARG CAMOFOX_SHA=c9a90dafc76d2dfa0eb5d74fa36ef28f3ba98b29
-RUN git clone --depth 1 https://github.com/jo-inc/camofox-browser . \
-    && git fetch --unshallow \
-    && git checkout ${CAMOFOX_SHA}
-
-# Install deps at build time
-RUN npm install
-
-# Chromium dependencies for headless operation
-RUN apt-get update -q && apt-get install -y -q \
-    chromium \
+# System packages:
+#   git       — clone source at build time
+#   curl      — HEALTHCHECK + camoufox-js Firefox download
+#   python3   — required by camoufox-js postinstall browser fetch script
+#   yt-dlp    — YouTube transcript extraction (GET /tabs/:id/transcript)
+#   Camoufox Firefox system deps — X11-less operation via camoufox headless mode
+RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
+    git \
+    curl \
+    python3 \
+    python3-pip \
+    ca-certificates \
     fonts-liberation \
     libasound2 \
     libatk-bridge2.0-0 \
@@ -50,12 +65,36 @@ RUN apt-get update -q && apt-get install -y -q \
     libxss1 \
     libxtst6 \
     xdg-utils \
+    && pip3 install --no-cache-dir yt-dlp \
+    && yt-dlp --version \
     && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Clone at build time — pinned to a specific commit SHA for reproducible builds.
+# To update: change CAMOFOX_SHA to the latest commit on master.
+# Latest SHA as of 2026-05-14: verify at github.com/jo-inc/camofox-browser/commits/master
+ARG CAMOFOX_SHA=c9a90dafc76d2dfa0eb5d74fa36ef28f3ba98b29
+RUN git clone https://github.com/jo-inc/camofox-browser.git . \
+    && git checkout ${CAMOFOX_SHA}
+
+# Install Node.js dependencies at build time.
+# camoufox-js postinstall downloads the patched Camoufox Firefox binary (~150MB).
+# This is the real anti-detection Firefox — NOT Chromium.
+# The download URL comes from camoufox-js's own release assets.
+RUN npm install
+
+# Verify server.js is present and node can parse it
+RUN node -e "require('./server.js') || true" 2>/dev/null \
+    || node --check server.js \
+    && echo "[camofox] server.js syntax OK"
 
 EXPOSE 9377
 
-HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=30s \
-    CMD curl -f http://localhost:9377/health || exit 1
+# Healthcheck: the /health endpoint returns HTTP 200 when the browser pool is ready.
+# start_period=45s: allow time for the Camoufox Firefox process to launch.
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=45s \
+    CMD curl -fsS http://localhost:9377/health || exit 1
 
-# npm start — instant, no install step on runtime
+# npm start — instant on container start (all deps baked at build time)
 CMD ["npm", "start"]

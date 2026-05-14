@@ -1,6 +1,6 @@
 # =============================================================================
 # Rhodawk AI — Hermes General-Purpose Autonomous Agent
-# VPS Single-Click Deployment Dockerfile  v7.0
+# VPS Single-Click Deployment Dockerfile  v8.0
 #
 # Usage:
 #   docker build -f Dockerfile.vps -t rhodawk-hermes .
@@ -23,7 +23,15 @@
 #   /data/               — mount a named volume here to survive restarts
 #                          Stores: hermes config, memories, cron, sessions, logs
 #
-# Changes from v6.1 → v7.0:
+# Changes from v7.0 → v8.0 (full production fix pass):
+#   FIX-A  hermes-agent: install from GitHub source, not PyPI (not on PyPI)
+#          `pip install "hermes-agent[...] @ git+https://github.com/..."
+#   FIX-B  jcode: correct release tarball name was jcode-linux-x86_64.tar.gz,
+#          not jcode-x86_64-unknown-linux-musl.tar.gz (always 404'd before)
+#   FIX-C  openclaude: symlink binary into /usr/local/bin/ so shutil.which()
+#          resolves it — without this the gRPC server spawns nothing
+#
+# Previous changes (v6.1 → v7.0):
 #   FIX-5  duckduckgo-search installed for zero-API-key web search fallback
 #
 # Previous changes (v6.0 → v6.1):
@@ -75,14 +83,30 @@ RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
     && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
     && pip3 install --upgrade pip setuptools wheel
 
-# ── Agent 1: HERMES-AGENT ────────────────────────────────────────────────────
-# hermes-agent is the full autonomous agent framework (terminal tool, skills,
-# memory, cron, multi-provider LLM routing). Install when available on PyPI.
-# If not available the built-in gateway/run.py (python-telegram-bot + openai)
-# is used automatically via main.py's three-tier fallback.
-RUN pip3 install --no-cache-dir "hermes-agent[messaging]>=0.10.0" \
-    || pip3 install --no-cache-dir "hermes-agent>=0.10.0" \
-    || echo "[hermes-agent] PyPI package not available — built-in gateway.run will be used"
+# ── Agent 1: HERMES-AGENT — installed from GitHub source (NousResearch) ──────
+# FIX-A: hermes-agent (github.com/NousResearch/hermes-agent, 149K ★) is NOT
+# published on PyPI as a standalone pip-installable package. Both `pip install
+# hermes-agent>=0.10.0` attempts in v7.0 silently failed (No matching
+# distribution found), leaving the bot running the stripped gateway/run.py
+# fallback with no memory, no skills, no cron, and no multi-channel support.
+#
+# Correct install: pip install from the GitHub source URL using PEP 440
+# direct references ("@ git+https://..."). pip clones the repo, runs
+# setuptools, and installs the `hermes` CLI entry point + all Python modules.
+#
+# Extras:
+#   messaging — Telegram, Discord, Slack, WhatsApp, Signal, Email gateway
+#   pty       — seven terminal backends (local, Docker, SSH, Modal, Daytona…)
+#   mcp       — Model Context Protocol server support (filesystem, github, …)
+#   acp       — Agent Communication Protocol (openclaw ↔ hermes inter-agent)
+#
+# After this step: `hermes --version` and `hermes gateway` are available.
+# The `hermes` binary is installed into the pip entry_points scripts dir
+# (typically /usr/local/bin/hermes). supervisord calls `hermes gateway`.
+RUN pip3 install --no-cache-dir \
+    "hermes-agent[messaging,pty,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git" \
+    && hermes --version \
+    && echo "[hermes-agent] installed from source — binary at $(which hermes)"
 
 # ── Remaining Python dependencies from requirements.txt ───────────────────────
 # hermes-agent base already installed above; this adds:
@@ -103,28 +127,49 @@ RUN pip3 install --no-cache-dir "duckduckgo-search>=6.0.0" \
     && python3 -c "from duckduckgo_search import DDGS; print('[ddg] duckduckgo-search OK')"
 
 # ── Agent 2: OPENCLAUDE — cloned from GitHub source ───────────────────────────
-# openclaude provides a gRPC coding server at localhost:50051 (bidirectional
-# streaming, YOLO action-approval). Cloned from source because the npm package
-# does not include scripts/start-grpc.ts.
-# Fallback: if the repo is unavailable, supervisord starts the Python gRPC
-# server at skills/openclaude_grpc/server.py instead (same proto interface).
+# FIX-C: After `bun install`, openclaude's CLI binary lives at
+#   /opt/openclaude/bin/openclaude   (declared in package.json: "bin":{"openclaude":"./bin/openclaude"})
+# Without a symlink into PATH, shutil.which("openclaude") returns None and the
+# Python gRPC server at skills/openclaude_grpc/server.py fails to spawn it.
+# The symlink makes the real openclaude binary callable system-wide.
+#
+# Note: scripts/start-grpc.ts does NOT exist in the openclaude repo — it is a
+# CLI coding agent, not a gRPC service. supervisord always falls through to the
+# Python gRPC wrapper (skills/openclaude_grpc/server.py), which correctly spawns
+# `openclaude --print --no-tty --message "TASK"` as a subprocess. Now that the
+# binary is in PATH, this wrapper actually calls the real openclaude agent.
+#
+# The detectStubLeaks patch is applied with a warning-only failure (|| true) so
+# that newer openclaude versions that removed the function don't break the build.
 RUN git clone --depth=1 https://github.com/Gitlawb/openclaude.git /opt/openclaude \
     && cd /opt/openclaude \
     && bun install \
-    && python3 -c "import re,sys; f='src/entrypoints/sdk/index.ts'; t=open(f).read(); p=re.sub(r'^detectStubLeaks\(\);?$','// detectStubLeaks() // patched: Bun v1.3 TDZ bug',t,flags=re.MULTILINE); (sys.exit('PATCH FAILED') if p==t else None); open(f,'w').write(p); print('Patched:',f)" \
-    && echo "[openclaude] source ready — $(ls scripts/start-grpc.ts) present" \
-    || echo "[openclaude] source unavailable — Python gRPC server fallback will be used"
+    && python3 -c "
+import re, sys, pathlib
+f = pathlib.Path('src/entrypoints/sdk/index.ts')
+if not f.exists():
+    print('[openclaude] src/entrypoints/sdk/index.ts not found — skipping detectStubLeaks patch')
+    sys.exit(0)
+t = f.read_text()
+p = re.sub(r'^detectStubLeaks\(\);?$', '// detectStubLeaks() // patched: Bun v1.3 TDZ bug', t, flags=re.MULTILINE)
+if p == t:
+    print('[openclaude] detectStubLeaks() not found in current version — patch not needed')
+else:
+    f.write_text(p)
+    print('[openclaude] Patched: detectStubLeaks() commented out in', str(f))
+" \
+    && ln -sf /opt/openclaude/bin/openclaude /usr/local/bin/openclaude \
+    && openclaude --version 2>/dev/null | head -1 \
+    && echo "[openclaude] installed from source — binary at $(which openclaude)" \
+    || echo "[WARN] openclaude source unavailable — Python gRPC server fallback will be used (check network)"
 
 # ── Agent 3: OPENCLAW — openclaw/openclaw (non-critical) ──────────────────────
 RUN npm install -g openclaw@latest 2>/dev/null || echo "[openclaw] install skipped (non-critical)"
 
-# ── Tool: JCODE — Rhodawk wrapper script (DO Inference scaffolding agent) ─────
-# The upstream 1jehuang/jcode install script is unreliable and was confirmed
-# missing on container boot (Blink diagnostic 2025-04-10). We ship our own
-# shell wrapper that calls DO Inference directly. It is API-compatible with
-# the jcode CLI interface used by supervisord and hermes-agent skills.
-# COPY happens after "COPY . /app/" below — this RUN block just marks the slot.
-# The actual COPY + chmod is at the end of the App structure section.
+# ── Agent 4: JCODE — real binary will be downloaded after COPY . /app/ ────────
+# FIX-B: Placeholder comment retained for build-layer ordering clarity.
+# The actual jcode binary install happens AFTER `COPY . /app/` below so that
+# the download step benefits from the full environment (curl, ca-certs, jq).
 
 # ── MCP servers — shared across all 3 agents ──────────────────────────────────
 # Install each server individually with retry + graceful failure so a single
@@ -151,21 +196,42 @@ WORKDIR /app
 COPY . /app/
 
 # ── Install jcode real binary from GitHub releases (1jehuang/jcode) ───────────
+# FIX-B: The v7.0 download used jcode-x86_64-unknown-linux-musl.tar.gz which
+# does not exist in any jcode release. The real asset name is:
+#   jcode-linux-x86_64.tar.gz  (verified against GitHub releases API)
+#
+# Safe extraction pattern: extract to /tmp/jcode-extract/, then `find` the
+# binary by name (tarball may contain a bare file OR a subdirectory). This is
+# robust against upstream tarball structure changes.
+#
+# Fallback: if the GitHub release download fails (network outage, rate limit),
+# install via the official install script which handles retries internally.
+# We do NOT fall back to `cargo install jcode` — that requires a full Rust
+# toolchain (~1GB) and takes 20+ minutes. The install script is faster.
 RUN set -e; \
-    JCODE_VER=$(curl -s https://api.github.com/repos/1jehuang/jcode/releases/latest | grep '"tag_name"' | cut -d'"' -f4 | sed 's/^v//'); \
-    echo "[jcode] Installing real binary v${JCODE_VER}"; \
-    curl -L "https://github.com/1jehuang/jcode/releases/download/v${JCODE_VER}/jcode-x86_64-unknown-linux-musl.tar.gz" \
-      | tar -xz -C /usr/local/bin/ \
-    && chmod +x /usr/local/bin/jcode \
-    && jcode --version \
-    && echo "[jcode] real binary installed at $(which jcode)" \
+    JCODE_VER=$(curl -fsSL https://api.github.com/repos/1jehuang/jcode/releases/latest \
+        | grep '"tag_name"' | head -1 | cut -d'"' -f4 | sed 's/^v//'); \
+    echo "[jcode] Installing real binary v${JCODE_VER} from GitHub releases"; \
+    mkdir -p /tmp/jcode-extract; \
+    curl -fsSL \
+        "https://github.com/1jehuang/jcode/releases/download/v${JCODE_VER}/jcode-linux-x86_64.tar.gz" \
+        | tar -xz -C /tmp/jcode-extract; \
+    JCODE_BIN=$(find /tmp/jcode-extract -type f -name 'jcode' | head -1); \
+    if [ -z "${JCODE_BIN}" ]; then \
+        echo "[jcode] ERROR: 'jcode' binary not found in tarball — contents:"; \
+        find /tmp/jcode-extract -type f; \
+        exit 1; \
+    fi; \
+    mv "${JCODE_BIN}" /usr/local/bin/jcode; \
+    chmod +x /usr/local/bin/jcode; \
+    rm -rf /tmp/jcode-extract; \
+    jcode --version; \
+    echo "[jcode] v${JCODE_VER} binary installed at $(which jcode)" \
     || ( \
-      echo "[jcode] prebuilt binary unavailable — building from source"; \
-      curl https://sh.rustup.rs -sSf | sh -s -- -y --no-modify-path; \
-      /root/.cargo/bin/cargo install jcode; \
-      cp /root/.cargo/bin/jcode /usr/local/bin/jcode; \
-      jcode --version; \
-      echo "[jcode] built from source OK"; \
+        echo "[jcode] GitHub release download failed — falling back to official install script"; \
+        curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash; \
+        jcode --version; \
+        echo "[jcode] installed via official install script OK"; \
     )
 
 # ── Generate OpenClaude gRPC Python stubs from proto ──────────────────────────
