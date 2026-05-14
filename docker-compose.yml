@@ -82,6 +82,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+      camofox:
+        condition: service_healthy
     volumes:
       # Persists across restarts: SQLite memory DB, hermes config, sessions, logs
       - hermes-data:/data
@@ -105,19 +107,22 @@ services:
         max-file: "5"
 
   camofox:
-    image: node:20-slim
+    build:
+      context: .
+      dockerfile: Dockerfile.camofox
     container_name: camofox
-    working_dir: /app
-    command: >
-      bash -c "apt-get update -q && apt-get install -y -q git &&
-               git clone --depth 1 https://github.com/jo-inc/camofox-browser . &&
-               npm install && npm start"
     ports:
       - "9377:9377"
     environment:
       - CAMOFOX_ACCESS_KEY=${CAMOFOX_ACCESS_KEY}
       - CAMOFOX_PORT=9377
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9377/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
     volumes:
       - camofox_data:/home/node/.camofox
     logging:

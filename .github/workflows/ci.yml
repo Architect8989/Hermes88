@@ -26,9 +26,9 @@ jobs:
         run: |
           REQUIRED=(
             TELEGRAM_BOT_TOKEN
-            NVIDIA_NIM_API_KEY
             DO_INFERENCE_API_KEY
             GITHUB_PAT
+            TELEGRAM_CHAT_ID
           )
           MISSING=()
           for key in "${REQUIRED[@]}"; do
@@ -46,7 +46,7 @@ jobs:
         run: |
           # Fail if any value looks like a real token (not a placeholder)
           # Patterns: hf_... ghp_... nvapi-... anything over 20 chars that isn't a placeholder
-          if grep -E "^(TELEGRAM_BOT_TOKEN|NVIDIA_NIM_API_KEY|DO_INFERENCE_API_KEY|GITHUB_PAT|HF_TOKEN)=.{20,}" \
+          if grep -E "^(TELEGRAM_BOT_TOKEN|DO_INFERENCE_API_KEY|GITHUB_PAT|TELEGRAM_CHAT_ID|HF_TOKEN)=.{20,}" \
               .env.example | grep -vE "_(here|key_here|token_here|your_)"; then
             echo "::error::.env.example appears to contain a real secret value. Replace with a placeholder."
             exit 1
@@ -99,12 +99,10 @@ jobs:
       - name: Install dependencies and run import check
         run: |
           pip install --quiet \
-            python-telegram-bot aiofiles aiosqlite loguru \
-            PyMuPDF pillow huggingface_hub
-          python3 -c "import bot.memory; print('bot.memory imports OK')"
+            python-telegram-bot aiofiles PyMuPDF pillow huggingface_hub requests
           python3 -c "
           import ast, sys
-          files = ['hermes_bot.py', 'bot/telegram_bot.py', 'bot/memory.py']
+          files = ['bot/telegram_bot.py', 'gateway/run.py', 'main.py', 'send_file.py']
           for f in files:
               try:
                   ast.parse(open(f).read())

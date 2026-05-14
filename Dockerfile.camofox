@@ -19,8 +19,12 @@ RUN apt-get update -q && apt-get install -y -q git \
 
 WORKDIR /app
 
-# Clone at build time — not at runtime
-RUN git clone --depth 1 https://github.com/jo-inc/camofox-browser .
+# Clone at build time — pinned to a specific commit SHA so image is reproducible.
+# Update ARG CAMOFOX_SHA when you intentionally want a newer version.
+ARG CAMOFOX_SHA=c9a90dafc76d2dfa0eb5d74fa36ef28f3ba98b29
+RUN git clone --depth 1 https://github.com/jo-inc/camofox-browser . \
+    && git fetch --unshallow \
+    && git checkout ${CAMOFOX_SHA}
 
 # Install deps at build time
 RUN npm install
@@ -49,6 +53,9 @@ RUN apt-get update -q && apt-get install -y -q \
     && rm -rf /var/lib/apt/lists/*
 
 EXPOSE 9377
+
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=30s \
+    CMD curl -f http://localhost:9377/health || exit 1
 
 # npm start — instant, no install step on runtime
 CMD ["npm", "start"]

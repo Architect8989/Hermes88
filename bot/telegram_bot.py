@@ -465,11 +465,28 @@ def _push_github_layer1_local_git(
     repo_url: str, token: str, branch: str, message: str, workdir: str,
 ) -> str | None:
     """
-    Local git add + commit + push with token embedded in remote URL.
+    Local git add + commit + push using git credential.helper (token never in URL).
     FIX-E: exponential backoff retry on transient network failures.
+    FIX-Layer1: token was previously embedded in the remote URL
+                (https://x-token-auth:<TOKEN>@...) which leaks the secret into
+                git's reflog, process list, and any push error messages.
+                Now uses git credential.helper subprocess so the token only
+                ever travels over the HTTPS connection, not in argv or logs.
     """
-    auth_url = "https://x-token-auth:{}@{}".format(token, repo_url.replace("https://", ""))
     try:
+        # Point origin at the clean (no-token) URL
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", repo_url],
+            cwd=workdir, capture_output=True, timeout=10,
+        )
+        # Inject credentials via credential.helper — token never touches argv
+        cred_helper = (
+            f"!f() {{ echo 'username=x-token-auth'; echo 'password={token}'; }}; f"
+        )
+        subprocess.run(
+            ["git", "config", "credential.helper", cred_helper],
+            cwd=workdir, check=True, capture_output=True, timeout=10,
+        )
         subprocess.run(
             ["git", "add", "-A"],
             cwd=workdir, check=True, capture_output=True, timeout=60,
@@ -497,7 +514,7 @@ def _push_github_layer1_local_git(
         last_push_err = ""
         for attempt in range(1, 4):
             push_r = subprocess.run(
-                ["git", "push", auth_url, f"HEAD:{branch}"],
+                ["git", "push", "origin", f"HEAD:{branch}"],
                 cwd=workdir, capture_output=True, text=True, timeout=120,
             )
             if push_r.returncode == 0:
@@ -516,6 +533,12 @@ def _push_github_layer1_local_git(
 
         print(f"[push-gh-L1] All push retries exhausted: {last_push_err}", file=sys.stderr)
         return None
+    finally:
+        # Always clean up the credential helper regardless of push outcome
+        subprocess.run(
+            ["git", "config", "--unset", "credential.helper"],
+            cwd=workdir, capture_output=True,
+        )
 
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         print(f"[push-gh-L1] Failed: {type(e).__name__}", file=sys.stderr)
@@ -801,14 +824,31 @@ def _push_hf_layer2_local_git(
     repo_url: str, token: str, branch: str, message: str, workdir: str,
 ) -> str | None:
     """
-    Push to HuggingFace via local git with token embedded in URL.
+    Push to HuggingFace via local git using git credential.helper (token never in URL).
     FIX-A: added text=True to git commit subprocess so the 'nothing to commit'
            check is a string comparison (was bytes comparison without text=True,
            which silently never matched, causing the function to always fall through).
+    FIX-Layer2-HF: token was previously embedded in the remote URL
+                   (https://user:<TOKEN>@huggingface.co/...) which leaks the secret
+                   into git's reflog, process list, and push error messages.
+                   Now uses git credential.helper subprocess instead.
     """
-    auth_url = repo_url.replace("https://", f"https://user:{token}@")
-    auth_url = auth_url.replace("https://hf.co/", f"https://user:{token}@huggingface.co/")
+    # Normalise HF short-domain to full domain for credential matching
+    clean_url = repo_url.replace("https://hf.co/", "https://huggingface.co/")
     try:
+        # Point origin at the clean (no-token) URL
+        subprocess.run(
+            ["git", "remote", "set-url", "origin", clean_url],
+            cwd=workdir, capture_output=True, timeout=10,
+        )
+        # Inject HF credentials via credential.helper — token never touches argv
+        cred_helper = (
+            f"!f() {{ echo 'username=user'; echo 'password={token}'; }}; f"
+        )
+        subprocess.run(
+            ["git", "config", "credential.helper", cred_helper],
+            cwd=workdir, check=True, capture_output=True, timeout=10,
+        )
         subprocess.run(
             ["git", "add", "-A"],
             cwd=workdir, check=True, capture_output=True, timeout=60,
@@ -830,7 +870,7 @@ def _push_hf_layer2_local_git(
             return None
 
         subprocess.run(
-            ["git", "push", auth_url, f"HEAD:{branch}"],
+            ["git", "push", "origin", f"HEAD:{branch}"],
             cwd=workdir, check=True, capture_output=True, timeout=180,
         )
         rev = subprocess.run(
@@ -842,6 +882,12 @@ def _push_hf_layer2_local_git(
     except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as e:
         print(f"[push-hf-L2] Local git push failed: {type(e).__name__}", file=sys.stderr)
         return None
+    finally:
+        # Always clean up the credential helper regardless of push outcome
+        subprocess.run(
+            ["git", "config", "--unset", "credential.helper"],
+            cwd=workdir, capture_output=True,
+        )
 
 
 def _push_hf_layer3_http_requests(

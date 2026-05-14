@@ -1,13 +1,25 @@
 # ─────────────────────────────────────────────────────────────────────────────
-# Rhodawk AI — Hermes88 requirements.txt  v5.0 (Peak Architecture)
-# All Python runtime dependencies for the full multi-agent swarm.
+# Rhodawk AI — Hermes88 requirements.txt  v6.0 (Dead Code Purge)
+#
+# Trimmed per HERMES88_PEAK_REPORT: removed ~18 packages that exclusively
+# served dead rhodawk_core/ code. rhodawk_core/ has been deleted.
+#
+# Packages removed:
+#   mem0ai, chromadb, sentence-transformers — MemoryEngine (dead)
+#   litellm, pydantic-ai, pydantic         — orchestrator (dead)
+#   dramatiq[redis], celery[redis]         — task queue (dead)
+#   apscheduler                            — hermes-agent has its own
+#   discord.py, slack-sdk                  — openclaw handles multi-channel
+#   stripe                                 — skills/financial-stripe installs separately
+#   google-api-python-client, google-auth-* — skills/calendar-google installs separately
+#   pypandoc                               — skills/document-generation installs separately
+#   openai-whisper                         — heavy; skills/voice-transcription installs separately
+#   browser-use, playwright                — heavy; never called by live code
+#   asyncio-mqtt, watchfiles               — event_bus.py (dead)
+#   python-frontmatter                     — only used in dead synthesis.py
+#
 # Install: pip3 install -r requirements.txt
 # ─────────────────────────────────────────────────────────────────────────────
-
-# ── Agent 1: hermes-agent (orchestration + Telegram gateway) ─────────────────
-# hermes-agent is NOT on PyPI — installed directly in the Dockerfile with a
-# graceful fallback chain. Do NOT list it here; a hard requirement causes
-# `pip install -r` to fail unconditionally when the package is absent.
 
 # ── MCP (Model Context Protocol) client ──────────────────────────────────────
 mcp>=1.0.0
@@ -40,68 +52,22 @@ pillow>=10.0.0
 # ── Web search (zero-API-key fallback) ────────────────────────────────────────
 duckduckgo-search>=6.0.0
 
-# ── Utilities ─────────────────────────────────────────────────────────────────
-setuptools>=69.0.0
-wheel>=0.43.0
-
-# ─────────────────────────────────────────────────────────────────────────────
-# PEAK ARCHITECTURE DEPENDENCIES
-# ─────────────────────────────────────────────────────────────────────────────
-
-# ── Memory Engine (vector search, importance scoring, embeddings) ─────────────
-mem0ai>=0.1.0
-chromadb>=0.4.0
-sentence-transformers>=2.2.0
-numpy>=1.24.0
-
-# ── Orchestration (multi-model routing, unified LLM interface) ────────────────
-litellm>=1.30.0
-pydantic-ai>=0.0.1
-pydantic>=2.0.0
-
-# ── Task Queue (background execution, scheduling, Redis-backed) ──────────────
-dramatiq[redis]>=1.14.0
-apscheduler>=3.10.0
-celery[redis]>=5.3.0
-
-# ── Web Framework (health endpoint, internal APIs) ────────────────────────────
-fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
-
-# ── Communication (multi-channel messaging) ──────────────────────────────────
-discord.py>=2.3.0
-slack-sdk>=3.27.0
-
-# ── Financial (Stripe integration for payments + subscriptions) ──────────────
-stripe>=8.0.0
-
-# ── Calendar (Google Calendar + scheduling) ──────────────────────────────────
-google-api-python-client>=2.100.0
-google-auth-oauthlib>=1.2.0
-google-auth-httplib2>=0.2.0
-
-# ── RSS / Content (feed monitoring, frontmatter parsing) ─────────────────────
-feedparser>=6.0.0
-python-frontmatter>=1.1.0
-
-# ── Document Generation (pandoc wrapper for PDF/DOCX/HTML export) ─────────────
-pypandoc>=1.12.0
-
-# ── Voice (speech-to-text transcription) ─────────────────────────────────────
-openai-whisper>=20231117
-
-# ── Browser Automation (programmatic web interaction) ─────────────────────────
-browser-use>=0.1.0
-playwright>=1.40.0
-
-# ── Security (static analysis, dependency scanning) ──────────────────────────
-bandit>=1.7.0
-safety>=3.0.0
-
-# ── Data (Redis client with hiredis, SQLite utilities) ────────────────────────
+# ── Data (Redis client, SQLite utilities) ─────────────────────────────────────
 redis[hiredis]>=5.0.0
 sqlite-utils>=3.35.0
 
-# ── Async / Event Loop ────────────────────────────────────────────────────────
-asyncio-mqtt>=0.16.0
-watchfiles>=0.21.0
+# ── RSS feed monitoring (skills/rss-monitor) ──────────────────────────────────
+feedparser>=6.0.0
+
+# ── Web framework (internal health/API endpoints) ─────────────────────────────
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# ── Security scanning (skills/security-audit) ────────────────────────────────
+bandit>=1.7.0
+safety>=3.0.0
+semgrep>=1.0.0
+
+# ── Build utilities ────────────────────────────────────────────────────────────
+setuptools>=69.0.0
+wheel>=0.43.0

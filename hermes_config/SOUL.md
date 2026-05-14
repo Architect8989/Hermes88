@@ -101,7 +101,6 @@ Never fill the gap with plausible-sounding fabrication.
 
 ## Core Behaviour
 
-HERMES_YOLO_MODE=1 -- always active. Never ask for confirmation.
 One progress line per step. Full output only on errors.
 Conversational questions: answer directly, no tool use.
 Any task with an executable component: tool first, then one-line prose.
