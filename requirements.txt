@@ -61,7 +61,7 @@ feedparser>=6.0.0
 
 # ── Web framework (internal health/API endpoints) ─────────────────────────────
 fastapi>=0.109.0
-uvicorn[standard]>=0.27.0
+uvicorn[standard]>=0.47.0
 
 # ── Security scanning (skills/security-audit) ────────────────────────────────
 bandit>=1.7.0
