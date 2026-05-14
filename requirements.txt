@@ -72,5 +72,5 @@ semgrep>=1.0.0
 pyyaml>=6.0.0
 
 # ── Build utilities ────────────────────────────────────────────────────────────
-setuptools>=69.0.0
+setuptools>=82.0.1
 wheel>=0.43.0
