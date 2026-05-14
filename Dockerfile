@@ -17,7 +17,7 @@
 #   FIX-D  chmod +x main.py added so it can be run directly
 # ─────────────────────────────────────────────────────────────────────────────
 
-FROM ubuntu:22.04
+FROM ubuntu:26.04
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
