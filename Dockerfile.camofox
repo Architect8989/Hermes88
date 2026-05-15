@@ -17,7 +17,7 @@
 #   POST /tabs/:id/type           — type into a field
 #   GET  /tabs/:id/screenshot     — base64 PNG screenshot
 #   POST /tabs/:id/extract        — structured JSON extraction via JSON Schema
-#   GET  /tabs/:id/transcript     — YouTube transcript via yt-dlp (no API key)
+#   GET  /tabs/:id/transcript     — YoUTube transcript via yt-dlp (no API key)
 #   GET  /search?q=QUERY&engine=google|youtube|amazon|reddit — search macros
 #   OpenAPI docs: http://localhost:9377/docs
 #
@@ -40,7 +40,7 @@ FROM node:22-slim
 
 # System packages aligned with the official jo-inc/camofox-browser Dockerfile.
 # node:22-slim is Debian Bookworm — package names differ from Ubuntu/Debian Bullseye:
-#   libasound2    -> libasound2t64
+#   libasound2t64 -> libasound2 (t64 suffix only exists in Debian Trixie/13, not Bookworm/12)
 #   libxss1       -> removed (no replacement needed for headless mode)
 RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
     git \
@@ -55,7 +55,7 @@ RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
     libgtk-3-0 \
     libdbus-glib-1-2 \
     libxt6 \
-    libasound2t64 \
+    libasound2 \
     libx11-xcb1 \
     libxcomposite1 \
     libxcursor1 \
