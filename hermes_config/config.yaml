@@ -7,6 +7,14 @@
 # -- Model configuration ----------------------------------------------------------
 model:
   default: "${HERMES_MODEL}"
+  # Explicitly set provider/base_url/api_key at the top level so hermes-agent's
+  # auxiliary client (title generation, compression) reads model.provider = 'openai'
+  # instead of falling back to the internal catalog which maps deepseek-v4-pro
+  # to 'openrouter'. Without these keys, auxiliary calls 401 with
+  # "Missing Authentication header" on every turn.
+  provider: "openai"
+  base_url: "${DO_INFERENCE_BASE_URL}"
+  api_key: "${DO_INFERENCE_API_KEY}"
   routing:
     reasoning: "${HERMES_MODEL}"
     coding: "${OPENCLAUDE_MODEL}"
