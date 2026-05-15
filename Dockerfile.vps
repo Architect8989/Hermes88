@@ -48,6 +48,10 @@ ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
 
 # ── System packages ────────────────────────────────────────────────────────────
+# Base image is ubuntu:22.04 (Ubuntu Jammy Jellyfish), NOT Debian Bookworm.
+# Debian Bookworm package renames (e.g. libasound2 → libasound2t64, libssl1.x
+# → libssl3) do NOT apply to Ubuntu 22.04 — Ubuntu uses its own package naming
+# and all names below are verified correct for ubuntu:22.04.
 RUN apt-get update && apt-get install -y --no-install-recommends \
     python3.11 python3.11-dev python3-pip \
     curl wget git supervisor \
@@ -203,14 +207,16 @@ RUN set -e; \
     curl -fsSL \
         "https://github.com/1jehuang/jcode/releases/download/v${JCODE_VER}/jcode-linux-x86_64.tar.gz" \
         | tar -xz -C /tmp/jcode-extract; \
-    JCODE_BIN=$(find /tmp/jcode-extract -type f -name 'jcode' | head -1); \
+    echo "[jcode] Tarball contents:"; find /tmp/jcode-extract -type f; \
+    JCODE_BIN=$(find /tmp/jcode-extract -type f \( -name 'jcode' -o -name 'jcode-linux-x86_64' \) ! -name '*.bin' | head -1); \
     if [ -z "${JCODE_BIN}" ]; then \
-        echo "[jcode] ERROR: 'jcode' binary not found in tarball — contents:"; \
-        find /tmp/jcode-extract -type f; \
+        echo "[jcode] ERROR: jcode binary not found in tarball"; \
         exit 1; \
     fi; \
     mv "${JCODE_BIN}" /usr/local/bin/jcode; \
     chmod +x /usr/local/bin/jcode; \
+    find /tmp/jcode-extract -name '*.so*' -exec cp {} /usr/local/lib/ \; ; \
+    ldconfig; \
     rm -rf /tmp/jcode-extract; \
     jcode --version; \
     echo "[jcode] v${JCODE_VER} binary installed at $(which jcode)" \
