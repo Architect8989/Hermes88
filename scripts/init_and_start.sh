@@ -146,6 +146,12 @@ export DO_INFERENCE_API_KEY="${DO_KEY_DEEPSEEK}"
 export HERMES_MODEL="${HERMES_MODEL_VAL}"
 export OPENCLAUDE_MODEL="${OPENCLAUDE_MODEL_VAL}"
 export JCODE_MODEL="${JCODE_MODEL_VAL}"
+# FIX-10: jcode env-var overrides (JCODE_API_KEY, JCODE_BASE_URL) take precedence
+#   over ~/.jcode/config.toml at runtime. Without these exports jcode serve
+#   found no provider credentials and exited with code 44.
+#   Kimi key used for jcode to preserve deepseek quota for hermes-agent.
+export JCODE_API_KEY="${DO_KEY_KIMI}"
+export JCODE_BASE_URL="${DO_BASE_URL}"
 export DO_FALLBACK_MODEL="${DO_FALLBACK_MODEL_VAL}"
 # OPENAI_* vars point to deepseek key — used by openclaude / jcode subprocesses
 export OPENAI_API_KEY="${DO_KEY_DEEPSEEK}"

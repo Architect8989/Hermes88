@@ -104,15 +104,17 @@ def run() -> None:
         for name, state in states.items():
             prev = last_state.get(name)
 
-            # Skip optional processes — their EXITED state is expected and normal.
+            # Skip optional processes — their EXITED/STOPPED state is expected and normal.
             # jcode-server: optional swarm coordinator (not installed → stays RUNNING
             #   via sleep infinity after the supervisord.conf fix).
             # openclaw-gateway: disabled until channels are configured via onboard.
+            # FIX-11: Only log on state change to avoid flooding logs every poll cycle.
             if name in OPTIONAL_PROCESSES:
-                print(
-                    f"[watchdog] {name} → {state} (optional — no alert)",
-                    flush=True,
-                )
+                if state != prev:
+                    print(
+                        f"[watchdog] {name} → {state} (optional — no alert)",
+                        flush=True,
+                    )
                 last_state[name] = state
                 continue
 
