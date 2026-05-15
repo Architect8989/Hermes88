@@ -8,7 +8,7 @@
 #
 # ── Quick start (fresh VPS, nothing installed) ────────────────────────────────
 #
-#   curl -fsSL https://huggingface.co/spaces/Architect8999/Hermes/raw/main/vps_deploy.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Architect8989/Hermes88/main/vps_deploy.sh | bash
 #
 # ── Unattended / CI / cloud-init (set secrets before piping) ─────────────────
 #
@@ -62,7 +62,7 @@ fatal() { echo -e "${RED}[fatal]${RESET} $*" >&2; exit 1; }
 
 # ── Script version + banner ───────────────────────────────────────────────────
 SCRIPT_VERSION="4.0"
-REPO_URL="https://huggingface.co/spaces/Architect8999/Hermes"
+REPO_URL="https://github.com/Architect8989/Hermes88"
 INSTALL_DIR_DEFAULT="${HOME}/hermes"
 
 echo ""
