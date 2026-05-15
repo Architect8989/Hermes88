@@ -4,7 +4,7 @@
 # Single-Shot VPS Installer  v3.0
 #
 # Usage (fresh Ubuntu 22.04 VPS, nothing pre-installed):
-#   curl -fsSL https://huggingface.co/spaces/Architect8999/Hermes/raw/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Architect8989/Hermes88/main/install.sh | bash
 #
 # Or if you already cloned the repo:
 #   bash install.sh
@@ -209,7 +209,7 @@ fi
 # =============================================================================
 step "6. Repository"
 
-REPO_URL="https://huggingface.co/spaces/Architect8999/Hermes"
+REPO_URL="https://github.com/Architect8989/Hermes88"
 INSTALL_DIR="${HOME}/hermes"
 
 if [[ -f "$(pwd)/Dockerfile.vps" && -f "$(pwd)/docker-compose.yml" ]]; then
@@ -386,7 +386,7 @@ INSTALL_DIR_ABS="$(realpath "${INSTALL_DIR}")"
 $SUDO tee "${SYSTEMD_UNIT_PATH}" > /dev/null << UNIT
 [Unit]
 Description=Rhodawk AI — Hermes Code Stabilizer
-Documentation=https://huggingface.co/spaces/Architect8999/Hermes
+Documentation=https://github.com/Architect8989/Hermes88
 After=docker.service network-online.target
 Wants=network-online.target
 Requires=docker.service
