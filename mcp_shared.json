@@ -1,25 +1,25 @@
 {
   "servers": {
     "filesystem": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "/tmp/repos", "/data", "/tmp"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/repos", "/data", "/tmp"],
       "shared": true
     },
     "github": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}" },
       "shared": true
     },
     "fetch": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-fetch/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"],
       "shared": true,
       "description": "Fetch any web URL and return content — enables web browsing and research"
     },
     "brave-search": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
       "env": { "BRAVE_API_KEY": "${BRAVE_API_KEY}" },
       "shared": true,
       "optional": true,
@@ -28,21 +28,21 @@
   },
   "mcpServers": {
     "filesystem": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "/tmp/repos", "/data", "/tmp"]
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "/tmp/repos", "/data", "/tmp"]
     },
     "github": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-github"],
       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}" }
     },
     "fetch": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-fetch/dist/index.js"]
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"]
     },
     "brave-search": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"],
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-brave-search"],
       "env": { "BRAVE_API_KEY": "${BRAVE_API_KEY}" }
     }
   }

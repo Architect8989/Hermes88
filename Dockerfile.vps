@@ -73,6 +73,7 @@ RUN curl -LO https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripg
 # Node.js 14+ is the minimum; 24.x is recommended and tested.
 RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
     && apt-get install -y nodejs \
+    && npm config set prefix /usr/local \
     && node --version \
     && npm --version \
     && echo "[node] $(node --version) installed — Nullish Coalescing (??) supported"

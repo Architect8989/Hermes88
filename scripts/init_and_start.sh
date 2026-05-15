@@ -128,6 +128,16 @@ export CLAUDE_CODE_USE_OPENAI=1
 # inline buttons, or you fully trust the LLM's judgment on the target repos.
 # See skills/openclaude_grpc/server.py for the full safety model.
 export HERMES_YOLO_MODE="${HERMES_YOLO_MODE:-0}"
+# Bug 3: jcode requires ANTHROPIC_API_KEY to pass startup validation even when
+# CLAUDE_CODE_USE_OPENAI=1 redirects all calls to DO Inference.
+# Set it to the DO key so the format check passes; actual calls go to DO.
+export ANTHROPIC_API_KEY="${DO_INFERENCE_API_KEY}"
+# Bug 4: Point hermes-agent's auxiliary compression client to DO Inference.
+# The auxiliary client respects OPENAI_* vars when no openrouter/nous key is set.
+export HERMES_AUXILIARY_PROVIDER="openai"
+export HERMES_AUXILIARY_BASE_URL="${DO_BASE_URL}"
+export HERMES_AUXILIARY_API_KEY="${DO_INFERENCE_API_KEY}"
+export HERMES_AUXILIARY_MODEL="${DO_FALLBACK_MODEL_VAL}"
 export HERMES_HOME=/data/.hermes
 export HERMES_GATEWAY_CONFIG="/data/.hermes/gateway.yaml"
 export HF_TOKEN="${HF_TOKEN:-}"
@@ -174,6 +184,11 @@ lines = [
     f"OPENAI_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
     f"OPENAI_MODEL={os.environ['OPENCLAUDE_MODEL']}",
     f"CLAUDE_CODE_USE_OPENAI=1",
+    f"ANTHROPIC_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
+    f"HERMES_AUXILIARY_PROVIDER=openai",
+    f"HERMES_AUXILIARY_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
+    f"HERMES_AUXILIARY_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
+    f"HERMES_AUXILIARY_MODEL={os.environ['DO_FALLBACK_MODEL']}",
     f"HERMES_YOLO_MODE={os.environ.get('HERMES_YOLO_MODE', '0')}",
     f"HERMES_GATEWAY_CONFIG=/data/.hermes/gateway.yaml",
     f"TELEGRAM_BOT_TOKEN={os.environ['TELEGRAM_BOT_TOKEN']}",
@@ -594,5 +609,15 @@ mkdir -p /data/.hermes/images /data/.hermes/screenshots
 echo "[layer-h] FAL.ai image output directories created"
 
 echo ""
+# Bug 1: Purge stale hermes-agent model/provider cache from persistent volume.
+# Without this, an old 'openrouter' provider config survives container restarts
+# and overrides gateway.yaml + config.yaml on every boot.
+echo "[init] Purging stale hermes-agent model config from /data/.hermes/ ..."
+rm -f /data/.hermes/model.json \
+      /data/.hermes/.hermes_model \
+      /data/.hermes/provider_config.json \
+      /data/.hermes/sessions/model_*.json 2>/dev/null || true
+echo "[init] Stale model config cleared."
+
 echo "[supervisord] Starting hermes-gateway + openclaude-grpc + jcode + openclaw-gateway..."
 exec supervisord -c /etc/supervisor/conf.d/rhodawk.conf

@@ -21,11 +21,11 @@ model:
     enabled: true
     chain:
       - model: "${HERMES_MODEL}"
-        provider: "do_inference"
+        provider: "openai"
         base_url: "${DO_INFERENCE_BASE_URL}"
         api_key: "${DO_INFERENCE_API_KEY}"
       - model: "${DO_FALLBACK_MODEL}"
-        provider: "do_inference"
+        provider: "openai"
         base_url: "${DO_INFERENCE_BASE_URL}"
         api_key: "${DO_INFERENCE_API_KEY}"
       - model: "claude-3-5-haiku-20241022"
