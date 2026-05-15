@@ -55,7 +55,7 @@ agent:
   context_window_limit: 120000
   max_history_messages: 100
   context_compression_enabled: true
-  context_compression_threshold: 0.60
+  context_compression_threshold: 0.20
   context_compression_target: 0.25
 
   # Skills + Memory + Sessions
@@ -90,6 +90,26 @@ platforms:
     reply_to_mode: first
     allowed_users: "${TELEGRAM_ALLOWED_USERS}"
     admin_chat_id: "${TELEGRAM_CHAT_ID}"
+    # Slash commands — pass_to_agent: true forwards to LLM instead of
+    # returning the generic "Unknown command" rejection message.
+    commands:
+      - command: start
+        description: "Show Hermes identity, memory, and status"
+        pass_to_agent: true
+      - command: commands
+        description: "List all available commands"
+        pass_to_agent: true
+      - command: status
+        description: "System health and active tasks"
+        pass_to_agent: true
+      - command: new
+        description: "Start a new session"
+        pass_to_agent: true
+      - command: stop
+        description: "Stop current task"
+        pass_to_agent: true
+    # Allow unknown slash commands to reach the LLM instead of erroring
+    unknown_command_passthrough: true
     # Streaming responses (progressive updates while processing)
     streaming_enabled: true
     streaming_interval: 2.0

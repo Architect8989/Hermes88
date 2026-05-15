@@ -97,7 +97,7 @@ echo ""
 # LLM routing — all agents use DigitalOcean Inference
 # ─────────────────────────────────────────────────────────────────────────────
 DO_BASE_URL="https://inference.do-ai.run/v1"
-HERMES_MODEL_VAL="deepseek-v4-pro"
+HERMES_MODEL_VAL="openai/deepseek-v4-pro"
 OPENCLAUDE_MODEL_VAL="deepseek-r1-distill-llama-70b"
 JCODE_MODEL_VAL="kimi-k2.6"
 DO_FALLBACK_MODEL_VAL="deepseek-r1-distill-llama-70b"
@@ -395,6 +395,38 @@ git        --version             | head -1 | sed 's/^/  git:            /'
 node       --version             | head -1 | sed 's/^/  node:           /'
 python3    --version             | head -1 | sed 's/^/  python3:        /'
 echo ""
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Override hermes-agent's built-in model→provider catalog
+# deepseek-v4-pro is hardcoded as an OpenRouter model in hermes-agent's
+# internal catalog. Running `hermes model` here rewrites the persisted
+# provider mapping in /data/.hermes/ so DO Inference wins on every boot.
+# The openai/ prefix in the model name is a belt-and-suspenders bypass:
+# most multi-provider LLM frameworks treat "provider/model" as an explicit
+# provider override that skips the internal catalog entirely.
+# ─────────────────────────────────────────────────────────────────────────────
+echo "[model] Reconfiguring hermes-agent primary model → DO Inference (openai-compatible)..."
+if command -v hermes &>/dev/null; then
+    hermes model \
+        --provider openai \
+        --base-url "${DO_INFERENCE_BASE_URL}" \
+        --api-key "${DO_INFERENCE_API_KEY}" \
+        "${HERMES_MODEL_VAL}" 2>&1 || \
+    hermes model set \
+        --provider openai \
+        --base-url "${DO_INFERENCE_BASE_URL}" \
+        --api-key "${DO_INFERENCE_API_KEY}" \
+        "${HERMES_MODEL_VAL}" 2>&1 || \
+    echo "[model] hermes model CLI override failed — falling back to env-var routing"
+fi
+
+# Belt-and-suspenders: purge any stale catalog override from the volume.
+# (Complements the later purge before supervisord — this one runs earlier
+# so the hermes model command above always starts from a clean slate.)
+rm -f /data/.hermes/model.json \
+      /data/.hermes/.hermes_model \
+      /data/.hermes/model_config.json 2>/dev/null || true
+echo "[model] Stale model config purged from /data/.hermes/"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Neutralize any stale OpenRouter override

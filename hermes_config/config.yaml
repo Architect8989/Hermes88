@@ -118,7 +118,7 @@ auxiliary:
 # -- Context compression (aggressive for long sessions) ----------------------------
 compression:
   enabled: true
-  threshold: 0.55
+  threshold: 0.20
   target_ratio: 0.20
   protect_last_n: 30
   strategy: "semantic_summary"
