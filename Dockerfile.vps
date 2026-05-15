@@ -144,20 +144,7 @@ RUN pip3 install --no-cache-dir "duckduckgo-search>=6.0.0" \
 RUN git clone --depth=1 https://github.com/Gitlawb/openclaude.git /opt/openclaude \
     && cd /opt/openclaude \
     && bun install \
-    && python3 -c "
-import re, sys, pathlib
-f = pathlib.Path('src/entrypoints/sdk/index.ts')
-if not f.exists():
-    print('[openclaude] src/entrypoints/sdk/index.ts not found — skipping detectStubLeaks patch')
-    sys.exit(0)
-t = f.read_text()
-p = re.sub(r'^detectStubLeaks\(\);?$', '// detectStubLeaks() // patched: Bun v1.3 TDZ bug', t, flags=re.MULTILINE)
-if p == t:
-    print('[openclaude] detectStubLeaks() not found in current version — patch not needed')
-else:
-    f.write_text(p)
-    print('[openclaude] Patched: detectStubLeaks() commented out in', str(f))
-" \
+    && python3 -c "import re,sys,pathlib; f=pathlib.Path('src/entrypoints/sdk/index.ts'); sys.exit(0) if not f.exists() else None; t=f.read_text(); p=re.sub(r'^detectStubLeaks\(\);?$','// detectStubLeaks() // patched: Bun v1.3 TDZ bug',t,flags=re.MULTILINE); f.write_text(p) if p!=t else None; print('[openclaude] Patched' if p!=t else '[openclaude] detectStubLeaks patch not needed')" \
     && ln -sf /opt/openclaude/bin/openclaude /usr/local/bin/openclaude \
     && openclaude --version 2>/dev/null | head -1 \
     && echo "[openclaude] installed from source — binary at $(which openclaude)" \
