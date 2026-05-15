@@ -4,7 +4,7 @@
 # One-command VPS installer
 #
 # Usage (fresh VPS, nothing installed):
-#   curl -fsSL https://huggingface.co/spaces/Architect8999/Hermes/raw/main/deploy.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Architect8989/Hermes88/main/deploy.sh | bash
 #
 # Or if you've already cloned the repo:
 #   bash deploy.sh
@@ -96,7 +96,7 @@ fi
 ok "Docker Compose: $(docker compose version --short)"
 
 # ── Repo setup ─────────────────────────────────────────────────────────────────
-REPO_URL="https://huggingface.co/spaces/Architect8999/Hermes"
+REPO_URL="https://github.com/Architect8989/Hermes88"
 INSTALL_DIR="$HOME/hermes"
 
 # Detect if we're already inside the cloned repo
