@@ -7,14 +7,11 @@
 # -- Model configuration ----------------------------------------------------------
 model:
   default: "${HERMES_MODEL}"
-  # Explicitly set provider/base_url/api_key at the top level so hermes-agent's
-  # auxiliary client (title generation, compression) reads model.provider = 'openai'
-  # instead of falling back to the internal catalog which maps deepseek-v4-pro
-  # to 'openrouter'. Without these keys, auxiliary calls 401 with
-  # "Missing Authentication header" on every turn.
-  provider: "openai"
-  base_url: "${DO_INFERENCE_BASE_URL}"
-  api_key: "${DO_INFERENCE_API_KEY}"
+  # hermes-agent's internal catalog maps deepseek-v4-pro to "openrouter".
+  # We do NOT override provider here — "openai" is not a valid provider name
+  # in hermes-agent's enum and causes "Unknown provider" fatal errors.
+  # Instead, OPENROUTER_BASE_URL and OPENROUTER_API_KEY in the .env file
+  # redirect all openrouter-destined calls to DO Inference at runtime.
   routing:
     reasoning: "${HERMES_MODEL}"
     coding: "${OPENCLAUDE_MODEL}"

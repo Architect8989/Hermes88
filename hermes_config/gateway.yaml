@@ -8,23 +8,20 @@
 # -- Agent model routing (enhanced multi-model with automatic failover) ---------
 agent:
   # Primary: DO Inference deepseek-v4-pro (reasoning + tool calling)
-  # provider: "openai" forces hermes-agent to use OpenAI-compatible routing
-  # and ignore its internal model catalog (which maps deepseek-v4-pro to openrouter).
-  provider: "openai"
-  base_url: "${DO_INFERENCE_BASE_URL}"
-  api_key: "${DO_INFERENCE_API_KEY}"
+  # provider MUST be "openrouter" — that is the only OpenAI-compatible provider
+  # name hermes-agent recognises. The OPENROUTER_BASE_URL + OPENROUTER_API_KEY
+  # env vars (set in init_and_start.sh / .env) redirect all openrouter-destined
+  # calls to DO Inference, so "openrouter" here == DO Inference at runtime.
+  # DO NOT set provider: "openai" — hermes-agent rejects it as "Unknown provider".
+  provider: "openrouter"
   model: "${HERMES_MODEL}"
 
   # Fallback tier 1: DO Inference lighter model (kicks in on 429/503)
-  fallback_provider: "openai"
-  fallback_base_url: "${DO_INFERENCE_BASE_URL}"
-  fallback_api_key: "${DO_INFERENCE_API_KEY}"
+  fallback_provider: "openrouter"
   fallback_model: "${DO_FALLBACK_MODEL}"
 
   # Fallback tier 2: kimi-k2.6 (kicks in when both primary + fallback are down)
-  fallback_tier2_provider: "openai"
-  fallback_tier2_base_url: "${DO_INFERENCE_BASE_URL}"
-  fallback_tier2_api_key: "${DO_INFERENCE_API_KEY}"
+  fallback_tier2_provider: "openrouter"
   fallback_tier2_model: "kimi-k2.6"
 
   # Behaviour
@@ -43,12 +40,10 @@ agent:
   # Soul / persona
   soul_path: "/data/.hermes/SOUL.md"
 
-  # Auxiliary model for compression/summarization — must use DO Inference, NOT Anthropic.
-  # Without this, hermes-agent falls back to its built-in catalog and picks
-  # claude-haiku-* routed to api.anthropic.com, which 401s without a real Anthropic key.
-  auxiliary_provider: "openai"
-  auxiliary_base_url: "${DO_INFERENCE_BASE_URL}"
-  auxiliary_api_key: "${DO_INFERENCE_API_KEY}"
+  # Auxiliary model for compression/summarization.
+  # Must be "openrouter" — same redirect as primary. OPENROUTER_BASE_URL points
+  # at DO Inference so this call also lands on DO Inference at runtime.
+  auxiliary_provider: "openrouter"
   auxiliary_model: "${DO_FALLBACK_MODEL}"
 
   # Context management (maximized for modern deepseek models)
