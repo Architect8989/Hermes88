@@ -90,26 +90,15 @@ platforms:
     reply_to_mode: first
     allowed_users: "${TELEGRAM_ALLOWED_USERS}"
     admin_chat_id: "${TELEGRAM_CHAT_ID}"
-    # Slash commands — pass_to_agent: true forwards to LLM instead of
-    # returning the generic "Unknown command" rejection message.
+    # Slash commands registered with Telegram BotFather.
+    # Format: plain list of command names (no leading slash).
+    # These are sent to Telegram's setMyCommands API on startup so the
+    # bot's command menu is populated. They are also forwarded to the LLM.
     commands:
-      - command: start
-        description: "Show Hermes identity, memory, and status"
-        pass_to_agent: true
-      - command: commands
-        description: "List all available commands"
-        pass_to_agent: true
-      - command: status
-        description: "System health and active tasks"
-        pass_to_agent: true
-      - command: new
-        description: "Start a new session"
-        pass_to_agent: true
-      - command: stop
-        description: "Stop current task"
-        pass_to_agent: true
-    # Allow unknown slash commands to reach the LLM instead of erroring
-    unknown_command_passthrough: true
+      - start
+      - status
+      - new
+      - stop
     # Streaming responses (progressive updates while processing)
     streaming_enabled: true
     streaming_interval: 2.0
@@ -117,6 +106,13 @@ platforms:
     voice_enabled: true
     voice_model: "whisper-large-v3"
     voice_language: "en"
+
+# -- Command routing (root-level — hermes-agent reads this from the gateway config root)
+# unknown_command_passthrough: forward unrecognized /slash commands to the LLM
+# instead of returning the hard-coded "Unknown command" rejection.
+# passthrough_slash_commands mirrors the key name used in some hermes-agent builds.
+unknown_command_passthrough: true
+passthrough_slash_commands: true
 
 # -- Webhook endpoints -----------------------------------------------------------
 webhooks:
