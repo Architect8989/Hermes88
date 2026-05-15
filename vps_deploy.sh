@@ -386,7 +386,7 @@ ok "All required secrets present in .env."
 
 # Report optional secrets status
 for KEY in NVIDIA_NIM_API_KEY HF_TOKEN BRAVE_API_KEY; do
-    val=$(grep -E "^${KEY}=" .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]')
+    val=$(grep -E "^${KEY}=" .env 2>/dev/null | cut -d= -f2- | tr -d '[:space:]' || true)
     if [[ -n "$val" ]]; then
         info "Optional: ${KEY} — present"
     else
