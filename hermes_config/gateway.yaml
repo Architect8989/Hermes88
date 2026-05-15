@@ -8,16 +8,21 @@
 # -- Agent model routing (enhanced multi-model with automatic failover) ---------
 agent:
   # Primary: DO Inference deepseek-v4-pro (reasoning + tool calling)
+  # provider: "openai" forces hermes-agent to use OpenAI-compatible routing
+  # and ignore its internal model catalog (which maps deepseek-v4-pro to openrouter).
+  provider: "openai"
   base_url: "${DO_INFERENCE_BASE_URL}"
   api_key: "${DO_INFERENCE_API_KEY}"
   model: "${HERMES_MODEL}"
 
   # Fallback tier 1: DO Inference lighter model (kicks in on 429/503)
+  fallback_provider: "openai"
   fallback_base_url: "${DO_INFERENCE_BASE_URL}"
   fallback_api_key: "${DO_INFERENCE_API_KEY}"
   fallback_model: "${DO_FALLBACK_MODEL}"
 
   # Fallback tier 2: kimi-k2.6 (kicks in when both primary + fallback are down)
+  fallback_tier2_provider: "openai"
   fallback_tier2_base_url: "${DO_INFERENCE_BASE_URL}"
   fallback_tier2_api_key: "${DO_INFERENCE_API_KEY}"
   fallback_tier2_model: "kimi-k2.6"
@@ -37,6 +42,14 @@ agent:
 
   # Soul / persona
   soul_path: "/data/.hermes/SOUL.md"
+
+  # Auxiliary model for compression/summarization — must use DO Inference, NOT Anthropic.
+  # Without this, hermes-agent falls back to its built-in catalog and picks
+  # claude-haiku-* routed to api.anthropic.com, which 401s without a real Anthropic key.
+  auxiliary_provider: "openai"
+  auxiliary_base_url: "${DO_INFERENCE_BASE_URL}"
+  auxiliary_api_key: "${DO_INFERENCE_API_KEY}"
+  auxiliary_model: "${DO_FALLBACK_MODEL}"
 
   # Context management (maximized for modern deepseek models)
   context_window_limit: 120000

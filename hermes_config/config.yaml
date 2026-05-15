@@ -101,6 +101,20 @@ memory:
     flat_file_path: "/data/.hermes/memories/MEMORY.md"
     log_degradation_warning: true
 
+# -- Auxiliary LLM (compression / summarization) ----------------------------------
+# Explicitly route the auxiliary client to DO Inference so hermes-agent never
+# falls back to its internal catalog (which selects claude-haiku → api.anthropic.com).
+auxiliary:
+  provider: "openai"
+  base_url: "${DO_INFERENCE_BASE_URL}"
+  api_key: "${DO_INFERENCE_API_KEY}"
+  model: "${DO_FALLBACK_MODEL}"
+  compression:
+    provider: "openai"
+    base_url: "${DO_INFERENCE_BASE_URL}"
+    api_key: "${DO_INFERENCE_API_KEY}"
+    model: "${DO_FALLBACK_MODEL}"
+
 # -- Context compression (aggressive for long sessions) ----------------------------
 compression:
   enabled: true
@@ -108,7 +122,10 @@ compression:
   target_ratio: 0.20
   protect_last_n: 30
   strategy: "semantic_summary"
-  summary_model: "${HERMES_MODEL}"
+  summary_model: "${DO_FALLBACK_MODEL}"
+  summary_provider: "openai"
+  summary_base_url: "${DO_INFERENCE_BASE_URL}"
+  summary_api_key: "${DO_INFERENCE_API_KEY}"
   preserve_tool_results: true
   preserve_code_blocks: true
 
