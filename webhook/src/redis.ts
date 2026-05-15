@@ -41,6 +41,15 @@ function log(level: string, message: string, data?: Record<string, unknown>): vo
 
 let redisClient: Redis | null = null;
 let isConnected = false;
+let retriesExhausted = false;
+
+/** Error thrown when the Redis retry limit has been exceeded. Callers should respond with HTTP 503. */
+export class RedisUnavailableError extends Error {
+  constructor() {
+    super('Redis unavailable: retry limit exceeded');
+    this.name = 'RedisUnavailableError';
+  }
+}
 
 /**
  * Get or create the Redis client instance.
@@ -64,6 +73,7 @@ export function getRedisClient(): Redis {
       retryStrategy(times: number): number | null {
         if (times > 10) {
           log('error', 'Redis connection failed after 10 retries, giving up');
+          retriesExhausted = true;
           return null;
         }
         const delay = Math.min(times * 200, 5000);
@@ -89,6 +99,7 @@ export function getRedisClient(): Redis {
       retryStrategy(times: number): number | null {
         if (times > 10) {
           log('error', 'Redis connection failed after 10 retries, giving up');
+          retriesExhausted = true;
           return null;
         }
         const delay = Math.min(times * 200, 5000);
@@ -166,6 +177,10 @@ export function isRedisConnected(): boolean {
  * @returns Number of subscribers that received the message
  */
 export async function publishEvent(channel: string, event: HermesEvent): Promise<number> {
+  if (retriesExhausted) {
+    throw new RedisUnavailableError();
+  }
+
   const client = getRedisClient();
 
   try {

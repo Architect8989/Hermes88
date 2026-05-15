@@ -245,7 +245,7 @@ proactive:
 # -- Sandbox configuration ---------------------------------------------------------
 sandbox:
   enabled: true
-  manager_url: "http://sandbox-manager:8081"
+  manager_url: "http://sandbox-manager:8090"
   default_image: "rhodawk-sandbox:latest"
   max_concurrent: 5
   timeout: 600

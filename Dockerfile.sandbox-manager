@@ -35,7 +35,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
 # ============================================================
 # Stage 2: Minimal runtime image
 # ============================================================
-FROM scratch
+FROM gcr.io/distroless/static
 
 # Import CA certificates for any HTTPS calls (e.g., Docker registry API).
 COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/

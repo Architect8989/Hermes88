@@ -65,12 +65,7 @@ init_memory_store() {
     mkdir -p "$db_dir"
 
     if [ ! -f "$MEMORY_DB" ]; then
-        log_info "Creating new SQLite memory database..."
-        python3 -c "
-from rhodawk_core.memory import StructuredMemoryStore
-store = StructuredMemoryStore(db_path='${MEMORY_DB}')
-print('[memory] Database initialized with schema')
-" 2>/dev/null || log_warn "Memory store initialization via Python failed (non-critical)"
+        log_info "Memory database will be created on first write by hermes-agent."
     else
         log_info "Memory database already exists ($(du -h "$MEMORY_DB" | cut -f1))"
     fi

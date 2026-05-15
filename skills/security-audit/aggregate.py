@@ -51,7 +51,7 @@ def parse_safety(data: dict) -> list[dict]:
     for v in vulns:
         findings.append({
             "tool":     "safety",
-            "severity": "high",
+            "severity": v.get("severity", "unknown"),
             "title":    f"{v.get('package_name', 'unknown')} {v.get('vulnerable_spec', '')}",
             "file":     "requirements",
             "line":     0,
@@ -95,7 +95,9 @@ def main() -> None:
         "findings":       findings,
     }
 
-    os.makedirs(os.path.dirname(args.output), exist_ok=True)
+    parent = os.path.dirname(args.output)
+    if parent:
+        os.makedirs(parent, exist_ok=True)
     with open(args.output, "w") as f:
         json.dump(report, f, indent=2)
 

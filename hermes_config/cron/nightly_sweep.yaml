@@ -15,9 +15,12 @@ task: |
   print('\n'.join(next3))
   ")
   for REPO in $REPOS; do
+    REPOS_TMPFILE=$(mktemp --suffix=.json)
+    echo "[\"$REPO\"]" > "$REPOS_TMPFILE"
     python3 /app/skills/jcode_swarm/spawn.py \
-      --repos <(echo "[\"$REPO\"]") \
+      --repos "$REPOS_TMPFILE" \
       --task "Run pytest, fix all failures, push PR" \
       --workers 1
+    rm -f "$REPOS_TMPFILE"
     echo $REPO >> /data/completed_repos.txt
   done

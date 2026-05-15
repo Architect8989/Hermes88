@@ -99,6 +99,15 @@ check_task_workers() {
     fi
 }
 
+check_jcode() {
+    # Check jcode binary availability
+    if command -v jcode &>/dev/null; then
+        echo "healthy"
+    else
+        echo "degraded"
+    fi
+}
+
 # -- Main Health Check ---------------------------------------------------------
 
 main() {
@@ -122,6 +131,8 @@ main() {
     event_router_status=$(check_event_router)
     local task_workers_status
     task_workers_status=$(check_task_workers)
+    local jcode_status
+    jcode_status=$(check_jcode)
 
     # Determine overall status
     local overall="healthy"
@@ -133,7 +144,7 @@ main() {
         critical_down=true
     fi
 
-    for status in "$hermes_status" "$redis_status" "$openclaude_status" "$camofox_status" "$webhook_status" "$sandbox_status" "$event_router_status" "$task_workers_status"; do
+    for status in "$hermes_status" "$redis_status" "$openclaude_status" "$camofox_status" "$webhook_status" "$sandbox_status" "$event_router_status" "$task_workers_status" "$jcode_status"; do
         if [ "$status" = "unhealthy" ]; then
             unhealthy_count=$((unhealthy_count + 1))
         fi
@@ -158,11 +169,12 @@ main() {
     "webhook-receiver": "${webhook_status}",
     "sandbox-manager": "${sandbox_status}",
     "event-router": "${event_router_status}",
-    "task-workers": "${task_workers_status}"
+    "task-workers": "${task_workers_status}",
+    "jcode": "${jcode_status}"
   },
   "summary": {
-    "total": 8,
-    "healthy": $((8 - unhealthy_count)),
+    "total": 9,
+    "healthy": $((9 - unhealthy_count)),
     "unhealthy": ${unhealthy_count}
   }
 }

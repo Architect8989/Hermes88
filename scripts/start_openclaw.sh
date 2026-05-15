@@ -1,17 +1,16 @@
 #!/bin/bash
-# ─────────────────────────────────────────────────────────────────────────────
-# start_openclaw.sh — Start OpenClaw multi-platform gateway
-# Source: https://github.com/openclaw/openclaw
-# Role:   Delivers messages to WhatsApp, Discord, Slack, Signal and 20+ more
-#         (Telegram is handled by hermes-agent natively)
-# LLM:    DigitalOcean Inference (DeepSeek R1), fallback NVIDIA NIM
-# ─────────────────────────────────────────────────────────────────────────────
+# start_openclaw.sh — OpenClaw gateway launcher
+# Non-critical: sleeps gracefully if binary missing or unconfigured.
+#
+# FIX: Added --port 18789 to match supervisord.conf and the port that
+#      hermes-agent + health-check probe. Without it, openclaw binds to
+#      its default port (varies by version) instead of the expected 18789.
+
+echo "[openclaw] Starting multi-platform gateway on :18789 (DO Inference primary)..."
 
 if ! command -v openclaw &>/dev/null; then
-    echo "[openclaw] Binary not in PATH — install may have failed (non-critical)."
-    echo "[openclaw] Telegram delivery is handled by hermes-agent natively."
-    sleep infinity
+    echo "[openclaw] Binary not found — sleeping (non-critical)"
+    exec sleep infinity
 fi
 
-echo "[openclaw] Starting multi-platform gateway (DO Inference primary)..."
-exec openclaw gateway --allow-unconfigured 2>&1
+exec openclaw gateway --port 18789 --allow-unconfigured

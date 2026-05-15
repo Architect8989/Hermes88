@@ -201,28 +201,32 @@ def run_bounded(
     initial_failing: list[str] = []
     prev_passing:   list[str] = []
 
+    import os as _os
+    import signal as _signal
+
     while strikes < max_strikes:
         try:
             # Use start_new_session=True so the shell and ALL its children
-            # form a new process group. On timeout, os.killpg kills the entire tree.
-            result = subprocess.run(
+            # form a new process group. Switch to Popen so proc.pid is accessible
+            # in the TimeoutExpired handler — os.getpgid(0) would return the
+            # parent's pgid (this Python process), not the child's.
+            proc = subprocess.Popen(
                 cmd, shell=True, cwd=workdir,
-                capture_output=True, text=True,
-                timeout=per_strike_timeout,   # FIX-F: was hardcoded 1200
-                start_new_session=True,       # FIX-16: enables process group kill
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                text=True,
+                start_new_session=True,       # enables process group kill
             )
-        except subprocess.TimeoutExpired as te:
-            # Kill the entire process group (shell + children) on timeout
-            import signal
-            if hasattr(te, 'args') and te.args:
-                pass  # subprocess.run already killed the direct child
+            stdout, stderr = proc.communicate(timeout=per_strike_timeout)
+            result_returncode = proc.returncode
+        except subprocess.TimeoutExpired:
+            # Kill the entire process group (shell + children) on timeout.
+            # proc.pid is the session leader; with start_new_session=True its
+            # pgid == its pid, so getpgid(proc.pid) targets only the child tree.
             try:
-                import os as _os
-                # The process group ID equals the PID of the session leader (the shell)
-                # subprocess.run with start_new_session=True guarantees pgid == child pid
-                _os.killpg(_os.getpgid(0), signal.SIGKILL)
+                _os.killpg(_os.getpgid(proc.pid), _signal.SIGKILL)
             except (ProcessLookupError, PermissionError, OSError):
                 pass  # Process already dead or we don't own it
+            proc.communicate()  # drain pipes after kill
             strikes += 1
             last_stderr = (
                 f"[bounded-run] Command timed out after {per_strike_timeout}s "
@@ -231,10 +235,10 @@ def run_bounded(
             print(last_stderr, file=sys.stderr)
             continue
 
-        last_stdout = result.stdout
-        last_stderr = result.stderr or ""
+        last_stdout = stdout
+        last_stderr = stderr or ""
 
-        if result.returncode == 0:
+        if result_returncode == 0:
             return {
                 "success":      True,
                 "output":       last_stdout,
@@ -732,13 +736,18 @@ async function main() {{
 main().catch(e => {{ process.stderr.write('[push-gh-L3] ' + e.message + '\\n'); process.exit(1); }});
 """
     try:
-        script_path = "/tmp/rhodawk_push_gh_l3.js"
-        Path(script_path).write_text(script)
-        result = subprocess.run(
-            ["node", script_path],
-            capture_output=True, text=True, timeout=120,
-        )
-        Path(script_path).unlink(missing_ok=True)
+        import tempfile as _tempfile
+        fd, script_path = _tempfile.mkstemp(suffix=".js", prefix="rhodawk_push_gh_l3_")
+        try:
+            import os as _os_tmp
+            _os_tmp.close(fd)
+            Path(script_path).write_text(script)
+            result = subprocess.run(
+                ["node", script_path],
+                capture_output=True, text=True, timeout=120,
+            )
+        finally:
+            Path(script_path).unlink(missing_ok=True)
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
         print(f"[push-gh-L3] Node.js script failed: {result.stderr[:400]}", file=sys.stderr)

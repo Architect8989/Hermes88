@@ -69,7 +69,7 @@ persistent semantic memory and a human-readable knowledge vault.
 
 | Language | Component | Purpose |
 |----------|-----------|---------|
-| **Python** | `rhodawk_core/`, `gateway/`, `skills/`, `bot/` | Core AI orchestration, memory engine, gateway, all skills |
+| **Python** | `gateway/`, `skills/`, `bot/` | Core AI orchestration, memory engine, gateway, all skills |
 | **TypeScript** | `webhook/` | Webhook receiver server (GitHub, Stripe, system events) |
 | **Go** | `sandbox/` | Sandbox manager -- ephemeral container lifecycle management |
 | **Rust** | `rhodawk-tools/` | High-performance CLI tools (code search, analysis, statistics) |
@@ -82,7 +82,6 @@ persistent semantic memory and a human-readable knowledge vault.
 | Component | Directory | Description |
 |-----------|-----------|-------------|
 | **Hermes Gateway** | `gateway/` | Primary Telegram interface, event routing, conversation management |
-| **Rhodawk Core** | `rhodawk_core/` | Memory engine, orchestrator, task engine, event bus, audit, proactive engine |
 | **Skills** | `skills/` | 16 specialized skill modules (see below) |
 | **Webhook Server** | `webhook/` | TypeScript HTTP server for inbound webhooks (GitHub, Stripe, system) |
 | **Sandbox Manager** | `sandbox/` | Go HTTP service managing ephemeral Docker containers for code execution |
@@ -140,16 +139,6 @@ hermes88/
 |   |-- event_consumer.py            # Redis event consumer
 |   |-- memory_injector.py           # Pre-prompt memory injection
 |   |-- response_formatter.py        # Channel-specific formatting
-|
-|-- rhodawk_core/                     # Core engine (Python)
-|   |-- orchestrator.py              # Multi-model LLM routing + agent coordination
-|   |-- memory.py                    # Semantic memory (vector + graph + temporal)
-|   |-- task_engine.py               # Background task queue (dramatiq + Redis)
-|   |-- event_bus.py                 # Redis PubSub event system
-|   |-- proactive.py                 # Proactive perception engine
-|   |-- audit.py                     # Security audit logging
-|   |-- synthesis.py                 # Multi-source information synthesis
-|   |-- tools.py                     # Tool registry and schema generation
 |
 |-- webhook/                          # Webhook server (TypeScript)
 |   |-- src/server.ts                # Express HTTP server

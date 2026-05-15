@@ -85,8 +85,7 @@ RUN git clone https://github.com/jo-inc/camofox-browser.git . \
 RUN npm install
 
 # Verify server.js is present and node can parse it
-RUN node -e "require('./server.js') || true" 2>/dev/null \
-    || node --check server.js \
+RUN node --check server.js \
     && echo "[camofox] server.js syntax OK"
 
 EXPOSE 9377

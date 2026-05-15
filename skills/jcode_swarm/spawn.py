@@ -9,13 +9,12 @@ import json
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 
 
 async def spawn_worker(repo: str, task: str, idx: int) -> tuple[int, str]:
     """Spawn one jcode worker for a single repo. Returns (returncode, output)."""
-    import tempfile
-    import shutil
     workdir = tempfile.mkdtemp(prefix=f"swarm_{idx}_")
 
     try:

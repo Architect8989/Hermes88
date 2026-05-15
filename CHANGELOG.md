@@ -11,6 +11,81 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
 ---
 
+## [3.0.0] — 2025-05-10
+
+### Changed (SOUL.md v7.0 — Full Replacement)
+- Complete rewrite of `hermes_config/SOUL.md` from v6.0 to v7.0.
+- Added CEO persona layer: Hermes now identifies as the operator's
+  "antagonist-self" — no doubt, no hesitation, zero process theater.
+- Added 5 explicit Output Rules (Hedge Reducer, Direct Mode, Plain Text,
+  Execution Mandate, Task Completion Standard) replacing implicit guidance.
+- Replaced `tool_call` JSON format references in SOUL.md with imperative
+  natural-language action verbs — fixes deepseek-r1-distill-llama-70b
+  outputting tool call JSON as plain text instead of executing.
+- Added Long-Horizon Task Protocol (DeerFlow context engineering pattern):
+  decompose → sequential sub-goals → background PID polling → checkpoint
+  → final report with commit hash.
+- Added GOAP Planning Protocol (Ruflo goal-oriented action planning):
+  STATE → GOAL → ACTIONS → BLOCKERS → EXECUTE within same turn.
+- Added Web Fetch Decision Tree: camofox health check before every URL
+  fetch, with automatic fallback to spoofed-UA curl when camofox is down.
+- Added openclaude gRPC pre-check and exact invocation pattern to prevent
+  vague prompts that cause code block output instead of file writes.
+- Added focused context file pattern for sub-agent delegation.
+
+### Changed (gateway.yaml v7.0 delta)
+- `temperature`: 0.2 → 0.05 — deterministic tool dispatch, eliminates
+  model outputting prose where tool calls should be.
+- `timeout`: 600 → 900 — 15-minute LLM request window for long tasks.
+- `gateway_timeout`: 1800 → 3600 — allow hour-long autonomous tasks.
+- `max_tokens`: 8192 → 16384 — more room for complex reasoning chains.
+- `context_window_limit`: 28000 → 60000 — modern deepseek context budget.
+- `max_history_messages`: 30 → 50 — longer session memory.
+- `max_foreground_timeout`: 3600 → 7200 — 2-hour terminal tasks allowed.
+- Added `CAMOFOX_ACCESS_KEY` to `tools.terminal.passthrough_env`.
+
+### Changed (config.yaml — aligned with gateway.yaml v7.0)
+- Same parameter deltas applied to `hermes_config/config.yaml` for
+  consistency: max_tokens, temperature, context_limit, gateway_timeout,
+  max_history_messages, max_foreground_timeout.
+
+### Added (New Skill Files)
+- `skills/research-deep/SKILL.md` — Deep Research skill: 3-5 search
+  angles → full page fetch → structured report → save to
+  `/data/.hermes/research/` → Telegram summary.
+- `skills/competitive-intel/SKILL.md` — Competitive Intelligence skill
+  for XBOW, CrowdStrike Falcon, GitHub Advanced Security, Semgrep.
+  Outputs Competitor Card: pricing, moat, weakness, Rhodawk counter.
+- `skills/security-audit/SKILL.md` — Security Audit skill: clone →
+  bandit + safety + semgrep → aggregate → JSON report in
+  `/data/.hermes/audit_reports/`.
+- `skills/security-audit/aggregate.py` — Python aggregator: merges
+  bandit + safety JSON into unified Rhodawk audit report with
+  critical/high/medium/low bucketing.
+- `skills/stealth-browse/SKILL.md` — Stealth Browser skill (Camofox
+  v7.1): core fetch, YouTube transcript, cookie auth, session limits,
+  fallback to spoofed-UA curl when camofox is down.
+- `skills/openclaude_grpc/SKILL.md` — Updated with gRPC pre-check,
+  exact invocation pattern, and prompt format guidance to prevent
+  code block output instead of file writes.
+
+### Added (v7.1 — Camofox Stealth Browser)
+- `docker-compose.yml` — Added `camofox` service: node:20-slim,
+  clones `jo-inc/camofox-browser`, runs on port 9377, named volume
+  `camofox_data`, `restart: unless-stopped`.
+- `.env.example` — Added `CAMOFOX_ACCESS_KEY` with generation command.
+- Camofox resolves ~40% research skill blind spot: Cloudflare-protected
+  sites, JS SPAs, LinkedIn/Crunchbase, YouTube transcripts. Coverage
+  improves from ~60% to ~95%+. Deploy on DO VPS only (not HF Spaces).
+
+### Changed (init_and_start.sh v4.1 → v4.2)
+- Updated banner version string to v7.1.
+- Added deployment of new skill files:
+  research-deep, competitive-intel, security-audit, stealth-browse.
+- Creates `/data/.hermes/audit_reports/` on startup.
+
+---
+
 ## [2.1.0] — 2025-05-07
 
 ### Added
@@ -85,77 +160,3 @@ Versions follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 [2.0.0]: https://huggingface.co/spaces/Architect8999/Hermes/compare/v1.0.0...v2.0.0
 [1.0.0]: https://huggingface.co/spaces/Architect8999/Hermes/commits/main
 
----
-
-## [3.0.0] — 2025-05-10
-
-### Changed (SOUL.md v7.0 — Full Replacement)
-- Complete rewrite of `hermes_config/SOUL.md` from v6.0 to v7.0.
-- Added CEO persona layer: Hermes now identifies as the operator's
-  "antagonist-self" — no doubt, no hesitation, zero process theater.
-- Added 5 explicit Output Rules (Hedge Reducer, Direct Mode, Plain Text,
-  Execution Mandate, Task Completion Standard) replacing implicit guidance.
-- Replaced `tool_call` JSON format references in SOUL.md with imperative
-  natural-language action verbs — fixes deepseek-r1-distill-llama-70b
-  outputting tool call JSON as plain text instead of executing.
-- Added Long-Horizon Task Protocol (DeerFlow context engineering pattern):
-  decompose → sequential sub-goals → background PID polling → checkpoint
-  → final report with commit hash.
-- Added GOAP Planning Protocol (Ruflo goal-oriented action planning):
-  STATE → GOAL → ACTIONS → BLOCKERS → EXECUTE within same turn.
-- Added Web Fetch Decision Tree: camofox health check before every URL
-  fetch, with automatic fallback to spoofed-UA curl when camofox is down.
-- Added openclaude gRPC pre-check and exact invocation pattern to prevent
-  vague prompts that cause code block output instead of file writes.
-- Added focused context file pattern for sub-agent delegation.
-
-### Changed (gateway.yaml v7.0 delta)
-- `temperature`: 0.2 → 0.05 — deterministic tool dispatch, eliminates
-  model outputting prose where tool calls should be.
-- `timeout`: 600 → 900 — 15-minute LLM request window for long tasks.
-- `gateway_timeout`: 1800 → 3600 — allow hour-long autonomous tasks.
-- `max_tokens`: 8192 → 16384 — more room for complex reasoning chains.
-- `context_window_limit`: 28000 → 60000 — modern deepseek context budget.
-- `max_history_messages`: 30 → 50 — longer session memory.
-- `max_foreground_timeout`: 3600 → 7200 — 2-hour terminal tasks allowed.
-- Added `CAMOFOX_ACCESS_KEY` to `tools.terminal.passthrough_env`.
-
-### Changed (config.yaml — aligned with gateway.yaml v7.0)
-- Same parameter deltas applied to `hermes_config/config.yaml` for
-  consistency: max_tokens, temperature, context_limit, gateway_timeout,
-  max_history_messages, max_foreground_timeout.
-
-### Added (New Skill Files)
-- `skills/research-deep/SKILL.md` — Deep Research skill: 3-5 search
-  angles → full page fetch → structured report → save to
-  `/data/.hermes/research/` → Telegram summary.
-- `skills/competitive-intel/SKILL.md` — Competitive Intelligence skill
-  for XBOW, CrowdStrike Falcon, GitHub Advanced Security, Semgrep.
-  Outputs Competitor Card: pricing, moat, weakness, Rhodawk counter.
-- `skills/security-audit/SKILL.md` — Security Audit skill: clone →
-  bandit + safety + semgrep → aggregate → JSON report in
-  `/data/.hermes/audit_reports/`.
-- `skills/security-audit/aggregate.py` — Python aggregator: merges
-  bandit + safety JSON into unified Rhodawk audit report with
-  critical/high/medium/low bucketing.
-- `skills/stealth-browse/SKILL.md` — Stealth Browser skill (Camofox
-  v7.1): core fetch, YouTube transcript, cookie auth, session limits,
-  fallback to spoofed-UA curl when camofox is down.
-- `skills/openclaude_grpc/SKILL.md` — Updated with gRPC pre-check,
-  exact invocation pattern, and prompt format guidance to prevent
-  code block output instead of file writes.
-
-### Added (v7.1 — Camofox Stealth Browser)
-- `docker-compose.yml` — Added `camofox` service: node:20-slim,
-  clones `jo-inc/camofox-browser`, runs on port 9377, named volume
-  `camofox_data`, `restart: unless-stopped`.
-- `.env.example` — Added `CAMOFOX_ACCESS_KEY` with generation command.
-- Camofox resolves ~40% research skill blind spot: Cloudflare-protected
-  sites, JS SPAs, LinkedIn/Crunchbase, YouTube transcripts. Coverage
-  improves from ~60% to ~95%+. Deploy on DO VPS only (not HF Spaces).
-
-### Changed (init_and_start.sh v4.1 → v4.2)
-- Updated banner version string to v7.1.
-- Added deployment of new skill files:
-  research-deep, competitive-intel, security-audit, stealth-browse.
-- Creates `/data/.hermes/audit_reports/` on startup.

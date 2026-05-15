@@ -25,7 +25,7 @@ agent:
   # Behaviour
   max_tokens: 16384
   temperature: 0.05
-  yolo_mode: true
+  yolo_mode: false
   timeout: 1800
   gateway_timeout: 7200
 

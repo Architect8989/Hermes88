@@ -79,6 +79,13 @@ if [ ${#MISSING[@]} -gt 0 ]; then
 fi
 echo "[init] All required secrets present."
 
+# Warn if TELEGRAM_ALLOWED_USERS is unset — bot will respond to ALL users.
+if [ -z "${TELEGRAM_ALLOWED_USERS:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
+    echo "[WARN] TELEGRAM_ALLOWED_USERS and TELEGRAM_CHAT_ID are both unset."
+    echo "       The bot will respond to ALL Telegram users."
+    echo "       Set TELEGRAM_CHAT_ID (or TELEGRAM_ALLOWED_USERS) to restrict access."
+fi
+
 if [ -n "${HF_TOKEN}" ]; then
     echo "[init] HF_TOKEN present — HuggingFace push enabled."
 else

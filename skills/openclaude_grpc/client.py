@@ -21,7 +21,10 @@ import subprocess
 import sys
 import uuid
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pathlib as _pathlib
+sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
 
 try:
     import grpc

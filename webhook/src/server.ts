@@ -305,10 +305,7 @@ export async function startServer(): Promise<void> {
 }
 
 // Auto-start if this is the main module
-const isMainModule = process.argv[1]?.endsWith('server.ts') ||
-  process.argv[1]?.endsWith('server.js');
-
-if (isMainModule) {
+if (require.main === module) {
   startServer().catch((err: unknown) => {
     const error = err instanceof Error ? err : new Error(String(err));
     log('error', 'Failed to start server', { error: error.message });

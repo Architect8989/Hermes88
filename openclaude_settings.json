@@ -3,22 +3,22 @@
     "do-fast": {
       "base_url": "https://inference.do-ai.run/v1",
       "api_key": "${DO_INFERENCE_API_KEY}",
-      "model": "deepseek-r1-distill-llama-70b"
+      "model": "do-inference/deepseek-r1-distill-llama-70b"
     },
     "do-coder": {
       "base_url": "https://inference.do-ai.run/v1",
       "api_key": "${DO_INFERENCE_API_KEY}",
-      "model": "deepseek-v4-pro"
+      "model": "do-inference/deepseek-v4-pro"
     },
     "do-review": {
       "base_url": "https://inference.do-ai.run/v1",
       "api_key": "${DO_INFERENCE_API_KEY}",
-      "model": "kimi-k2.6"
+      "model": "do-inference/kimi-k2.6"
     },
     "do-reasoning": {
       "base_url": "https://inference.do-ai.run/v1",
       "api_key": "${DO_INFERENCE_API_KEY}",
-      "model": "deepseek-r1"
+      "model": "do-inference/deepseek-r1"
     }
   },
   "agentRouting": {

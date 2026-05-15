@@ -18,14 +18,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-# Ensure rhodawk_core is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
-
-try:
-    from rhodawk_core.memory import MemoryEngine, MemoryEntry
-    MEMORY_AVAILABLE = True
-except ImportError:
-    MEMORY_AVAILABLE = False
+# rhodawk_core is mimic code that was never shipped — memory integration is disabled.
+MEMORY_AVAILABLE = False
 
 
 @dataclass

@@ -52,7 +52,10 @@ import subprocess
 import sys
 from concurrent import futures
 
-sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import pathlib as _pathlib
+sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(_pathlib.Path(__file__).resolve().parent))
 
 logging.basicConfig(level=logging.INFO, stream=sys.stdout)
 logger = logging.getLogger("openclaude-grpc")

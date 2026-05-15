@@ -61,3 +61,4 @@ WORKDIR /home/sandbox/workspace
 # Entry point accepts commands via bash -c.
 # The sandbox manager passes the user's command as the first argument.
 ENTRYPOINT ["/bin/bash", "-c"]
+CMD ["--help"]

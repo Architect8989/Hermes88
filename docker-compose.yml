@@ -26,9 +26,9 @@
 services:
   # ── Redis Stack (vector search + pub/sub + sorted sets) ─────────────────────
   # FIX Problem-9: Redis Stack is now included in docker-compose.yml so that:
-  #   - rhodawk_core.memory.MemoryEngine can use Redis vector search
-  #   - rhodawk_core.task_engine.TaskQueue has a broker for background tasks
-  #   - rhodawk_core.event_bus.EventBus can publish/subscribe to events
+  #   - Memory engine can use Redis vector search
+  #   - Task queue has a broker for background tasks
+  #   - Event bus can publish/subscribe to events
   #   - APScheduler cron engine has a job store
   #
   # Graceful degradation: if redis is unavailable at startup (e.g., on very
@@ -138,3 +138,7 @@ volumes:
     driver: local
   camofox_data:
     driver: local
+
+networks:
+  hermes-net:
+    driver: bridge

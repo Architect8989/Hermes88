@@ -183,12 +183,22 @@ if command -v ufw &>/dev/null; then
     $SUDO ufw allow ssh   > /dev/null 2>&1 || true
     # Block the container's internal port from public internet
     $SUDO ufw deny 7860   > /dev/null 2>&1 || true
+    # Block internal service ports from public internet.
+    # These ports are for inter-container traffic only and must not be
+    # exposed externally: Redis, sandbox-manager (both ports), camofox,
+    # webhook-receiver, and openclaw gateway.
+    $SUDO ufw deny 6379   > /dev/null 2>&1 || true  # Redis
+    $SUDO ufw deny 8081   > /dev/null 2>&1 || true  # sandbox-manager (legacy)
+    $SUDO ufw deny 8090   > /dev/null 2>&1 || true  # sandbox-manager
+    $SUDO ufw deny 9377   > /dev/null 2>&1 || true  # camofox stealth browser
+    $SUDO ufw deny 9000   > /dev/null 2>&1 || true  # webhook-receiver
+    $SUDO ufw deny 18789  > /dev/null 2>&1 || true  # openclaw gateway
     # Enable (non-interactively) only if not already active
     if $SUDO ufw status | grep -q "Status: active"; then
         ok "UFW already active — rules updated."
     else
         $SUDO ufw --force enable > /dev/null 2>&1 || true
-        ok "UFW enabled: SSH allowed, port 7860 blocked."
+        ok "UFW enabled: SSH allowed, internal service ports blocked."
     fi
 else
     warn "ufw not available — skipping firewall configuration."

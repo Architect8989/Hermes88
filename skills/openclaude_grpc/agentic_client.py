@@ -465,10 +465,14 @@ class AgenticLoop:
 
     def _flush_file(self, path: str, lines: list):
         """Write a file to the workdir."""
-        # Sanitize path to prevent directory traversal
+        # Sanitize path to prevent directory traversal using resolve()-based check.
+        # The naive ".." string check is bypassed by encoded sequences and symlinks;
+        # resolving both paths and comparing prefixes is safe against all variants.
         clean_path = path.lstrip("/").lstrip("./")
-        if ".." in clean_path:
-            print(f"[agentic] Rejected path with '..': {path}", flush=True)
+        safe_root = pathlib.Path(self.workdir).resolve()
+        candidate = (safe_root / clean_path).resolve()
+        if not str(candidate).startswith(str(safe_root) + os.sep) and candidate != safe_root:
+            print(f"[agentic] Rejected path (traversal detected): {path}", flush=True)
             return
 
         fpath = pathlib.Path(self.workdir) / clean_path

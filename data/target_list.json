@@ -9,7 +9,6 @@
   "https://github.com/pytest-dev/pytest",
   "https://github.com/aio-libs/aiohttp",
   "https://github.com/benoitc/gunicorn",
-  "https://github.com/encode/starlette",
   "https://github.com/MagicStack/uvloop",
   "https://github.com/aio-libs/aiofiles",
   "https://github.com/encode/uvicorn",
