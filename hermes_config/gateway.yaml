@@ -5,24 +5,33 @@
 # All API keys come from environment (exported in init_and_start.sh).
 # Template variables ${VAR} are expanded at deploy time by Python string.Template.
 
-# -- Agent model routing (enhanced multi-model with automatic failover) ---------
+# -- Agent model routing (3-key per-model failover) ----------------------------
+# Each model has its own dedicated DO Inference API key (DO_KEY_DEEPSEEK /
+# DO_KEY_KIMI / DO_KEY_QWEN). Same base URL, isolated quotas. When tier N hits
+# rate limits mid-task, tier N+1 receives the full conversation history so the
+# task continues from the exact step where tier N stopped.
+#
+# provider MUST be "openrouter" — the only OpenAI-compatible provider name
+# hermes-agent accepts. OPENROUTER_BASE_URL + OPENROUTER_API_KEY redirect to
+# DO Inference at runtime (set in init_and_start.sh).
+# Per-model keys are injected via OPENROUTER_API_KEY_{MODEL} env vars so each
+# tier uses its own quota independently.
 agent:
-  # Primary: DO Inference deepseek-v4-pro (reasoning + tool calling)
-  # provider MUST be "openrouter" — that is the only OpenAI-compatible provider
-  # name hermes-agent recognises. The OPENROUTER_BASE_URL + OPENROUTER_API_KEY
-  # env vars (set in init_and_start.sh / .env) redirect all openrouter-destined
-  # calls to DO Inference, so "openrouter" here == DO Inference at runtime.
-  # DO NOT set provider: "openai" — hermes-agent rejects it as "Unknown provider".
   provider: "openrouter"
-  model: "${HERMES_MODEL}"
+  model: "deepseek-v4-pro"
 
-  # Fallback tier 1: DO Inference lighter model (kicks in on 429/503)
+  # Fallback tier 1: kimi-k2.6 (own key — unaffected by deepseek rate limits)
   fallback_provider: "openrouter"
-  fallback_model: "${DO_FALLBACK_MODEL}"
+  fallback_model: "kimi-k2.6"
 
-  # Fallback tier 2: kimi-k2.6 (kicks in when both primary + fallback are down)
+  # Fallback tier 2: qwen3.5-397b-a17b (own key — last resort with full context)
   fallback_tier2_provider: "openrouter"
-  fallback_tier2_model: "kimi-k2.6"
+  fallback_tier2_model: "qwen3.5-397b-a17b"
+
+  # Context continuity: pass full message history to next model on failover.
+  # The new model sees all previous tool calls and partial step outputs and
+  # continues from exactly where the previous model stopped.
+  preserve_context_on_failover: true
 
   # Behaviour
   max_tokens: 16384
@@ -41,10 +50,9 @@ agent:
   soul_path: "/data/.hermes/SOUL.md"
 
   # Auxiliary model for compression/summarization.
-  # Must be "openrouter" — same redirect as primary. OPENROUTER_BASE_URL points
-  # at DO Inference so this call also lands on DO Inference at runtime.
+  # Uses kimi-k2.6 (own key) — keeps deepseek key quota reserved for reasoning.
   auxiliary_provider: "openrouter"
-  auxiliary_model: "${DO_FALLBACK_MODEL}"
+  auxiliary_model: "kimi-k2.6"
 
   # Context management (maximized for modern deepseek models)
   context_window_limit: 120000

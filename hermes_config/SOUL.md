@@ -173,24 +173,41 @@ Background tasks: report completion asynchronously via event bus.
 
 ## Model Routing Strategy
 
-Primary (reasoning + tool calling): deepseek-v4-pro via DO Inference
+3-key per-model failover — same DO Inference base URL, isolated quotas per model.
+Each model has its own dedicated API key so one model hitting rate limits never
+blocks the other tiers.
+
+Primary (reasoning + tool calling): deepseek-v4-pro via DO Inference (DO_KEY_DEEPSEEK)
   - All orchestration, research, synthesis, decision-making
   - Context: 131K tokens, Output: 16K tokens
   - Temperature: 0.05 (deterministic tool dispatch)
 
-Coding (precision edits): deepseek-r1-distill-llama-70b via DO Inference
-  - openclaude gRPC agentic loops
-  - Strongest at code understanding and surgical edits
-  - Temperature: 0.02
-
-Scaffolding (bulk generation): kimi-k2.6 via DO Inference
+Fallback 1: kimi-k2.6 via DO Inference (DO_KEY_KIMI)
+  - Kicks in when deepseek-v4-pro hits HTTP 429 or 503
+  - Also used for auxiliary compression (keeps deepseek quota for reasoning)
   - jcode swarm workers
-  - Fast, cheap, good at boilerplate generation
   - Temperature: 0.1
 
-Fallback chain: deepseek-v4-pro -> deepseek-r1-distill-llama-70b -> kimi-k2.6
-Trigger: HTTP 429 (rate limit) or 503 (service unavailable)
-Backoff: exponential with jitter (1s, 2s, 4s, 8s, 16s max)
+Fallback 2: qwen3.5-397b-a17b via DO Inference (DO_KEY_QWEN)
+  - Last resort — fully independent key and quota
+  - Temperature: 0.1
+
+Failover trigger: HTTP 429 (rate limit) or 503 (service unavailable)
+Backoff: exponential with jitter (2s base, 60s max)
+
+CONTEXT CONTINUITY RULE (CRITICAL):
+When a model hits rate limits mid-task (e.g. at step 4 of 10), the fallback
+model receives the FULL conversation history — all tool calls, results, and
+partial step outputs from the primary session. The fallback model MUST:
+1. Read the task progress context provided in the prompt
+2. Identify the last completed step
+3. Continue from the NEXT step — never restart from scratch
+4. Maintain all state accumulated by the previous model (files written, commands
+   run, decisions made)
+
+Report the switch to the operator:
+"[Rate limit on deepseek-v4-pro at step 4] Switching to kimi-k2.6. Continuing
+from step 5. Context preserved."
 
 ## Web Search -- 4-TIER CASCADE (Layer G) NEVER FABRICATE, NEVER DECLARE UNAVAILABLE
 

@@ -66,10 +66,22 @@ echo "╚═══════════════════════�
 echo ""
 
 # ── Validate required secrets ──────────────────────────────────────────────────
+# 3 per-model DO Inference keys — same base URL, isolated quotas.
+# DO_KEY_DEEPSEEK → deepseek-v4-pro  (primary)
+# DO_KEY_KIMI     → kimi-k2.6        (fallback 1)
+# DO_KEY_QWEN     → qwen3.5-397b-a17b (fallback 2)
+#
+# Backward-compat: if only DO_INFERENCE_API_KEY is set (old single-key setup),
+# all three model keys fall back to it so existing deployments keep working.
+# New deployments should set all three keys for independent rate-limit quotas.
 MISSING=()
-[ -z "${TELEGRAM_BOT_TOKEN}" ]   && MISSING+=("TELEGRAM_BOT_TOKEN")
-[ -z "${DO_INFERENCE_API_KEY}" ] && MISSING+=("DO_INFERENCE_API_KEY")
-[ -z "${GITHUB_PAT}" ]           && MISSING+=("GITHUB_PAT")
+[ -z "${TELEGRAM_BOT_TOKEN}" ] && MISSING+=("TELEGRAM_BOT_TOKEN")
+[ -z "${GITHUB_PAT}" ]         && MISSING+=("GITHUB_PAT")
+
+# At least one of: the three per-model keys OR the legacy single key
+if [ -z "${DO_KEY_DEEPSEEK:-}" ] && [ -z "${DO_INFERENCE_API_KEY:-}" ]; then
+    MISSING+=("DO_KEY_DEEPSEEK (or DO_INFERENCE_API_KEY for legacy single-key mode)")
+fi
 
 if [ ${#MISSING[@]} -gt 0 ]; then
     echo "[FATAL] Missing required secrets: ${MISSING[*]}"
@@ -77,7 +89,17 @@ if [ ${#MISSING[@]} -gt 0 ]; then
     echo "        VPS:       edit .env and re-run: bash install.sh"
     exit 1
 fi
+
+# Resolve per-model keys — fall back to legacy key when individual key not set
+DO_KEY_DEEPSEEK="${DO_KEY_DEEPSEEK:-${DO_INFERENCE_API_KEY}}"
+DO_KEY_KIMI="${DO_KEY_KIMI:-${DO_INFERENCE_API_KEY:-${DO_KEY_DEEPSEEK}}}"
+DO_KEY_QWEN="${DO_KEY_QWEN:-${DO_INFERENCE_API_KEY:-${DO_KEY_DEEPSEEK}}}"
+
 echo "[init] All required secrets present."
+echo "[init] Model key status:"
+echo "       DO_KEY_DEEPSEEK → deepseek-v4-pro  : $([ -n "${DO_KEY_DEEPSEEK}" ] && echo SET || echo MISSING)"
+echo "       DO_KEY_KIMI     → kimi-k2.6         : $([ -n "${DO_KEY_KIMI}" ] && echo SET || echo "MISSING (falling back to deepseek key)")"
+echo "       DO_KEY_QWEN     → qwen3.5-397b-a17b : $([ -n "${DO_KEY_QWEN}" ] && echo SET || echo "MISSING (falling back to deepseek key)")"
 
 # Warn if TELEGRAM_ALLOWED_USERS is unset — bot will respond to ALL users.
 if [ -z "${TELEGRAM_ALLOWED_USERS:-}" ] && [ -z "${TELEGRAM_CHAT_ID:-}" ]; then
@@ -109,46 +131,50 @@ echo ""
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Export all env vars NOW so supervisord child processes inherit them.
-# FIX-1: Export BOTH DO_BASE_URL and DO_INFERENCE_BASE_URL so Python
-#        subprocesses can reference either name without KeyError.
+# Per-model keys exported individually so config.yaml ${DO_KEY_*} vars expand.
+# DO_INFERENCE_API_KEY kept as alias for DO_KEY_DEEPSEEK (backward compat).
 # ─────────────────────────────────────────────────────────────────────────────
 export DO_BASE_URL="${DO_BASE_URL}"
 export DO_INFERENCE_BASE_URL="${DO_BASE_URL}"
-export DO_INFERENCE_API_KEY="${DO_INFERENCE_API_KEY}"
+# Per-model keys — each model has its own isolated quota on DO Inference
+export DO_KEY_DEEPSEEK="${DO_KEY_DEEPSEEK}"
+export DO_KEY_KIMI="${DO_KEY_KIMI}"
+export DO_KEY_QWEN="${DO_KEY_QWEN}"
+# Legacy alias — points to deepseek key; keeps old scripts that reference
+# DO_INFERENCE_API_KEY working without modification
+export DO_INFERENCE_API_KEY="${DO_KEY_DEEPSEEK}"
 export HERMES_MODEL="${HERMES_MODEL_VAL}"
 export OPENCLAUDE_MODEL="${OPENCLAUDE_MODEL_VAL}"
 export JCODE_MODEL="${JCODE_MODEL_VAL}"
 export DO_FALLBACK_MODEL="${DO_FALLBACK_MODEL_VAL}"
-export OPENAI_API_KEY="${DO_INFERENCE_API_KEY}"
+# OPENAI_* vars point to deepseek key — used by openclaude / jcode subprocesses
+export OPENAI_API_KEY="${DO_KEY_DEEPSEEK}"
 export OPENAI_BASE_URL="${DO_BASE_URL}"
 export OPENAI_MODEL="${OPENCLAUDE_MODEL_VAL}"
 export CLAUDE_CODE_USE_OPENAI=1
 # SECURITY: HERMES_YOLO_MODE=0 (safe default) — openclaude uses --permission-mode plan (read-only).
-# Set to 1 ONLY if you have implemented the ActionRequired approval loop via Telegram
-# inline buttons, or you fully trust the LLM's judgment on the target repos.
-# See skills/openclaude_grpc/server.py for the full safety model.
 export HERMES_YOLO_MODE="${HERMES_YOLO_MODE:-0}"
-# Bug 3: jcode requires ANTHROPIC_API_KEY to pass startup validation even when
-# CLAUDE_CODE_USE_OPENAI=1 redirects all calls to DO Inference.
-# Set it to the DO key so the format check passes; actual calls go to DO.
-export ANTHROPIC_API_KEY="${DO_INFERENCE_API_KEY}"
-# Bug 4: Point hermes-agent's auxiliary compression client to DO Inference.
-# The auxiliary client respects OPENAI_* vars when no openrouter/nous key is set.
+# jcode requires ANTHROPIC_API_KEY for startup validation even when redirected to DO.
+export ANTHROPIC_API_KEY="${DO_KEY_DEEPSEEK}"
+# Auxiliary compression client uses kimi key — keeps deepseek quota for reasoning.
 export HERMES_AUXILIARY_PROVIDER="openai"
 export HERMES_AUXILIARY_BASE_URL="${DO_BASE_URL}"
-export HERMES_AUXILIARY_API_KEY="${DO_INFERENCE_API_KEY}"
-export HERMES_AUXILIARY_MODEL="${DO_FALLBACK_MODEL_VAL}"
+export HERMES_AUXILIARY_API_KEY="${DO_KEY_KIMI}"
+export HERMES_AUXILIARY_MODEL="kimi-k2.6"
 export HERMES_HOME=/data/.hermes
 export HERMES_GATEWAY_CONFIG="/data/.hermes/gateway.yaml"
 export HF_TOKEN="${HF_TOKEN:-}"
 export GITHUB_PAT="${GITHUB_PAT}"
 export TELEGRAM_BOT_TOKEN="${TELEGRAM_BOT_TOKEN}"
-# FIX-7: Export TELEGRAM_CHAT_ID so hermes-agent's allowlist is populated.
 export TELEGRAM_CHAT_ID="${TELEGRAM_CHAT_ID:-}"
-# Camofox container hostname (Docker Compose service name — NOT localhost)
 export CAMOFOX_HOST="camofox"
 export CAMOFOX_PORT="9377"
-echo "[env] All LLM + token env vars exported (DO_BASE_URL and DO_INFERENCE_BASE_URL both set)."
+# hermes-agent routes via "openrouter" provider. OPENROUTER_* redirects that to
+# DO Inference. Primary key = DO_KEY_DEEPSEEK; failover chain uses per-model keys
+# via config.yaml ${DO_KEY_*} expansions, so each tier hits its own quota.
+export OPENROUTER_API_KEY="${DO_KEY_DEEPSEEK}"
+export OPENROUTER_BASE_URL="${DO_BASE_URL}"
+echo "[env] Per-model keys exported: DO_KEY_DEEPSEEK / DO_KEY_KIMI / DO_KEY_QWEN → DO Inference"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Configure hermes-agent
@@ -168,27 +194,39 @@ mkdir -p /data/.hermes/skills/devops-pipeline \
 python3 - << 'PYEOF'
 import os, pathlib
 p = pathlib.Path("/data/.hermes/.env")
-# FIX-7: Include TELEGRAM_CHAT_ID and TELEGRAM_ALLOWED_USERS so hermes-agent's
-#         platform allowlist is populated (fixes "No user allowlists configured").
 telegram_chat_id = os.environ.get('TELEGRAM_CHAT_ID', '')
+# Per-model keys — each model gets its own isolated DO Inference quota.
+# config.yaml failover chain expands ${DO_KEY_*} to select the right key
+# per tier, so a rate-limited tier never blocks another tier's key.
+do_key_deepseek = os.environ['DO_KEY_DEEPSEEK']
+do_key_kimi     = os.environ['DO_KEY_KIMI']
+do_key_qwen     = os.environ['DO_KEY_QWEN']
+do_base_url     = os.environ['DO_INFERENCE_BASE_URL']
 lines = [
     f"HERMES_HOME=/data/.hermes",
-    f"DO_INFERENCE_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
-    f"DO_INFERENCE_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
-    f"DO_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
+    # Per-model API keys (new — each model has its own isolated quota)
+    f"DO_KEY_DEEPSEEK={do_key_deepseek}",
+    f"DO_KEY_KIMI={do_key_kimi}",
+    f"DO_KEY_QWEN={do_key_qwen}",
+    # Legacy alias — deepseek key; keeps old scripts that reference DO_INFERENCE_API_KEY
+    f"DO_INFERENCE_API_KEY={do_key_deepseek}",
+    f"DO_INFERENCE_BASE_URL={do_base_url}",
+    f"DO_BASE_URL={do_base_url}",
     f"HERMES_MODEL={os.environ['HERMES_MODEL']}",
     f"OPENCLAUDE_MODEL={os.environ['OPENCLAUDE_MODEL']}",
     f"JCODE_MODEL={os.environ['JCODE_MODEL']}",
     f"DO_FALLBACK_MODEL={os.environ['DO_FALLBACK_MODEL']}",
-    f"OPENAI_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
-    f"OPENAI_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
+    # OPENAI_* → deepseek key (used by openclaude / jcode subprocesses)
+    f"OPENAI_API_KEY={do_key_deepseek}",
+    f"OPENAI_BASE_URL={do_base_url}",
     f"OPENAI_MODEL={os.environ['OPENCLAUDE_MODEL']}",
     f"CLAUDE_CODE_USE_OPENAI=1",
-    f"ANTHROPIC_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
+    f"ANTHROPIC_API_KEY={do_key_deepseek}",
+    # Auxiliary compression uses kimi key — reserves deepseek quota for reasoning
     f"HERMES_AUXILIARY_PROVIDER=openai",
-    f"HERMES_AUXILIARY_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
-    f"HERMES_AUXILIARY_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
-    f"HERMES_AUXILIARY_MODEL={os.environ['DO_FALLBACK_MODEL']}",
+    f"HERMES_AUXILIARY_BASE_URL={do_base_url}",
+    f"HERMES_AUXILIARY_API_KEY={do_key_kimi}",
+    f"HERMES_AUXILIARY_MODEL=kimi-k2.6",
     f"HERMES_YOLO_MODE={os.environ.get('HERMES_YOLO_MODE', '0')}",
     f"HERMES_GATEWAY_CONFIG=/data/.hermes/gateway.yaml",
     f"TELEGRAM_BOT_TOKEN={os.environ['TELEGRAM_BOT_TOKEN']}",
@@ -198,15 +236,13 @@ lines = [
     f"HF_TOKEN={os.environ.get('HF_TOKEN', '')}",
     f"BRAVE_API_KEY={os.environ.get('BRAVE_API_KEY', '')}",
     f"CAMOFOX_ACCESS_KEY={os.environ.get('CAMOFOX_ACCESS_KEY', '')}",
-    # Redirect hermes-agent's openrouter routing to DO Inference.
-    # hermes-agent routes deepseek-v4-pro to "openrouter" via its internal catalog.
-    # Pointing OPENROUTER_BASE_URL at DO Inference hijacks that routing so all
-    # openrouter-destined calls actually hit DO Inference with the correct key.
-    f"OPENROUTER_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
-    f"OPENROUTER_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
+    # hermes-agent routes via "openrouter" provider; OPENROUTER_* redirects to DO.
+    # Primary key = deepseek. Failover tiers use their own keys via config.yaml.
+    f"OPENROUTER_API_KEY={do_key_deepseek}",
+    f"OPENROUTER_BASE_URL={do_base_url}",
 ]
 p.write_text("\n".join(lines) + "\n")
-print(f"[hermes-agent] .env written to /data/.hermes/.env (TELEGRAM_ALLOWED_USERS={'set' if telegram_chat_id else 'not set — bot open to all'})")
+print(f"[hermes-agent] .env written — 3 per-model keys set. TELEGRAM_ALLOWED_USERS={'set' if telegram_chat_id else 'not set — bot open to all'}")
 PYEOF
 
 # Copy persona and skills from app bundle (plain copy — no template vars)

@@ -311,42 +311,73 @@ def _self_heal(
     cmd: str, workdir: str, stderr: str, strikes_remaining: int,
     api_key: str, base_url: str, model: str,
     prev_passing: list[str] | None = None,
+    step_context: str = "",
 ):
     """
     Invoke openclaude to fix failing code.
-    FIX-G: openclaude stderr now surfaces to our stderr so real errors are visible.
+
+    3-provider cascade with per-model keys (DO_KEY_DEEPSEEK / DO_KEY_KIMI /
+    DO_KEY_QWEN). Each model has its own isolated DO Inference quota so a
+    rate-limited primary never blocks fallback tiers.
+
+    Context continuity: step_context carries accumulated task progress (which
+    steps completed, what was produced). When the primary model hits a rate
+    limit mid-task, the next model receives that context and continues from the
+    exact step where the previous model stopped — not from scratch.
+
+    FIX-G: openclaude stderr surfaces to our stderr so real errors are visible.
     """
+    _DO_BASE = os.getenv("DO_INFERENCE_BASE_URL", "https://inference.do-ai.run/v1")
+
+    # 3-tier provider list — each entry uses its own dedicated API key so one
+    # model's rate-limit quota is completely independent of the others.
+    providers = [
+        {
+            "name":    "DO deepseek-v4-pro (primary)",
+            "base_url": base_url or _DO_BASE,
+            "api_key":  api_key or os.getenv("DO_KEY_DEEPSEEK", os.getenv("DO_INFERENCE_API_KEY", "")),
+            "model":    model or "deepseek-v4-pro",
+        },
+        {
+            "name":    "DO kimi-k2.6 (fallback 1)",
+            "base_url": _DO_BASE,
+            "api_key":  os.getenv("DO_KEY_KIMI", os.getenv("DO_INFERENCE_API_KEY", "")),
+            "model":    "kimi-k2.6",
+        },
+        {
+            "name":    "DO qwen3.5-397b-a17b (fallback 2)",
+            "base_url": _DO_BASE,
+            "api_key":  os.getenv("DO_KEY_QWEN", os.getenv("DO_INFERENCE_API_KEY", "")),
+            "model":    "qwen3.5-397b-a17b",
+        },
+    ]
+
     file_context     = _collect_failure_context(workdir, stderr)
     truncated_stderr = _smart_truncate(stderr, max_chars=12000)
     prev_str         = ", ".join(prev_passing[:20]) if prev_passing else "none tracked yet"
+
+    # Build the self-heal prompt. If step_context is provided (multi-step task
+    # mid-flight), prepend it so the incoming model knows exactly where we are.
+    context_block = ""
+    if step_context:
+        context_block = (
+            "\n## Task Progress Context (from previous model — continue from here)\n\n"
+            + step_context
+            + "\n\nDo NOT restart from scratch. Resume from the step marked as incomplete above.\n"
+        )
 
     prompt = SELF_HEAL_PROMPT_TEMPLATE.format(
         cmd=cmd,
         workdir=workdir,
         stderr=truncated_stderr,
-        file_context=file_context or "(no test files parsed — check workdir and test format)",
+        file_context=(file_context or "(no test files parsed — check workdir and test format)") + context_block,
         strikes_remaining=strikes_remaining,
         prev_passing=prev_str,
     )
 
-    providers = [
-        {
-            "name":     "DO Inference",
-            "base_url": base_url or os.getenv("DO_INFERENCE_BASE_URL", "https://inference.do-ai.run/v1"),
-            "api_key":  api_key or os.getenv("DO_INFERENCE_API_KEY", ""),
-            "model":    model or os.getenv("OPENCLAUDE_MODEL", "deepseek-v4-pro"),
-        },
-        {
-            "name":     "DO Inference (kimi-k2.6 fallback)",
-            "base_url": os.getenv("DO_INFERENCE_BASE_URL", "https://inference.do-ai.run/v1"),
-            "api_key":  os.getenv("DO_INFERENCE_API_KEY", ""),
-            "model":    "kimi-k2.6",
-        },
-    ]
-
     for provider in providers:
         if not provider["api_key"]:
-            print(f"[self-heal] Skipping {provider['name']} — no API key", file=sys.stderr)
+            print(f"[self-heal] Skipping {provider['name']} — no API key set", file=sys.stderr)
             continue
 
         env = {
@@ -361,6 +392,7 @@ def _self_heal(
         print(
             f"[self-heal] Strike remaining={strikes_remaining} "
             f"| provider={provider['name']} | context_chars={len(file_context)} "
+            f"| step_context={'yes' if step_context else 'none'} "
             f"| protected_tests={len(prev_passing or [])}",
             file=sys.stderr,
         )
@@ -369,29 +401,28 @@ def _self_heal(
                 ["python3", "/app/skills/openclaude_grpc/client.py",
                  "--prompt", prompt,
                  "--workdir", workdir,
-                 "--model", provider.get("model") or os.getenv("OPENAI_MODEL", "deepseek-v4-pro"),
+                 "--model", provider["model"],
                  "--timeout", "480"],
                 cwd=workdir, env=env,
                 capture_output=True, text=True,
                 timeout=510,
             )
-            # Surface gRPC client stderr so real errors are visible
             if result.stderr.strip():
                 print(f"[self-heal] grpc-client stderr:\n{result.stderr[-1000:]}", file=sys.stderr)
             if result.returncode == 0:
-                print(f"[self-heal] openclaude gRPC via {provider['name']} completed", file=sys.stderr)
+                print(f"[self-heal] {provider['name']} completed successfully", file=sys.stderr)
                 return
             print(
-                f"[self-heal] openclaude gRPC via {provider['name']} exited {result.returncode}",
+                f"[self-heal] {provider['name']} exited {result.returncode} — trying next provider",
                 file=sys.stderr,
             )
         except FileNotFoundError:
             print("[self-heal] grpc client not found at /app/skills/openclaude_grpc/client.py", file=sys.stderr)
             return
         except subprocess.TimeoutExpired:
-            print(f"[self-heal] openclaude gRPC via {provider['name']} timed out after 510s", file=sys.stderr)
+            print(f"[self-heal] {provider['name']} timed out after 510s — trying next provider", file=sys.stderr)
 
-    print("[self-heal] All providers exhausted", file=sys.stderr)
+    print("[self-heal] All 3 providers exhausted", file=sys.stderr)
 
 
 # ─────────────────────────────────────────────────────────────────────────────

@@ -17,37 +17,39 @@ model:
     coding: "${OPENCLAUDE_MODEL}"
     scaffolding: "${JCODE_MODEL}"
     embedding: "text-embedding-3-small"
-  # FIX Problem-7: Multi-provider failover — NOT just different model names on the same provider.
-  # Tier 1: DO Inference (deepseek-v4-pro) — primary, best tool calling + context window
-  # Tier 2: DO Inference (lighter model)   — same provider, kicks in on 429/503
-  # Tier 3: Anthropic claude-3-5-haiku     — DIFFERENT provider, kicks in on DO outage
-  # Tier 4: OpenRouter (qwen-2.5-72b)      — aggregator across 10+ providers, last resort
+  # 3-key per-model failover — each model has its own dedicated DO Inference API key.
+  # Same base URL (https://inference.do-ai.run/v1) for all three; different keys prevent
+  # one model's rate limit from blocking the others.
+  #
+  # Tier 1: deepseek-v4-pro   (DO_KEY_DEEPSEEK) — primary reasoning + tool calling
+  # Tier 2: kimi-k2.6         (DO_KEY_KIMI)     — fallback, kicks in on tier-1 429/503
+  # Tier 3: qwen3.5-397b-a17b (DO_KEY_QWEN)     — last resort, independent key + quota
+  #
+  # preserve_context: true — when tier N hits rate limits mid-task, tier N+1 receives
+  # the FULL conversation history (all tool calls, results, and partial step outputs)
+  # so it continues from exactly where tier N stopped, not from scratch.
   failover:
     enabled: true
+    preserve_context: true
     chain:
-      - model: "${HERMES_MODEL}"
+      - model: "deepseek-v4-pro"
         provider: "openai"
         base_url: "${DO_INFERENCE_BASE_URL}"
-        api_key: "${DO_INFERENCE_API_KEY}"
-      - model: "${DO_FALLBACK_MODEL}"
+        api_key: "${DO_KEY_DEEPSEEK}"
+      - model: "kimi-k2.6"
         provider: "openai"
         base_url: "${DO_INFERENCE_BASE_URL}"
-        api_key: "${DO_INFERENCE_API_KEY}"
-      - model: "claude-3-5-haiku-20241022"
-        provider: "anthropic"
-        base_url: "https://api.anthropic.com/v1"
-        api_key: "${ANTHROPIC_API_KEY}"
-        anthropic_version: "2023-06-01"
-      - model: "qwen/qwen-2.5-72b-instruct"
-        provider: "openrouter"
-        base_url: "https://openrouter.ai/api/v1"
-        api_key: "${OPENROUTER_API_KEY}"
+        api_key: "${DO_KEY_KIMI}"
+      - model: "qwen3.5-397b-a17b"
+        provider: "openai"
+        base_url: "${DO_INFERENCE_BASE_URL}"
+        api_key: "${DO_KEY_QWEN}"
     triggers:
       - status_code: 429
       - status_code: 503
       - status_code: 500
       - timeout: true
-    consecutive_failures_before_escalate: 2
+    consecutive_failures_before_escalate: 1
     backoff_strategy: exponential
     backoff_base_seconds: 2
     backoff_max_seconds: 60
@@ -107,18 +109,17 @@ memory:
     log_degradation_warning: true
 
 # -- Auxiliary LLM (compression / summarization) ----------------------------------
-# Explicitly route the auxiliary client to DO Inference so hermes-agent never
-# falls back to its internal catalog (which selects claude-haiku → api.anthropic.com).
+# Uses kimi-k2.6 key for compression — keeps deepseek key quota free for reasoning.
 auxiliary:
   provider: "openai"
   base_url: "${DO_INFERENCE_BASE_URL}"
-  api_key: "${DO_INFERENCE_API_KEY}"
-  model: "${DO_FALLBACK_MODEL}"
+  api_key: "${DO_KEY_KIMI}"
+  model: "kimi-k2.6"
   compression:
     provider: "openai"
     base_url: "${DO_INFERENCE_BASE_URL}"
-    api_key: "${DO_INFERENCE_API_KEY}"
-    model: "${DO_FALLBACK_MODEL}"
+    api_key: "${DO_KEY_KIMI}"
+    model: "kimi-k2.6"
 
 # -- Context compression (aggressive for long sessions) ----------------------------
 compression:
@@ -127,10 +128,10 @@ compression:
   target_ratio: 0.20
   protect_last_n: 30
   strategy: "semantic_summary"
-  summary_model: "${DO_FALLBACK_MODEL}"
+  summary_model: "kimi-k2.6"
   summary_provider: "openai"
   summary_base_url: "${DO_INFERENCE_BASE_URL}"
-  summary_api_key: "${DO_INFERENCE_API_KEY}"
+  summary_api_key: "${DO_KEY_KIMI}"
   preserve_tool_results: true
   preserve_code_blocks: true
 
