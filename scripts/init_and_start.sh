@@ -97,7 +97,7 @@ echo ""
 # LLM routing — all agents use DigitalOcean Inference
 # ─────────────────────────────────────────────────────────────────────────────
 DO_BASE_URL="https://inference.do-ai.run/v1"
-HERMES_MODEL_VAL="openai/deepseek-v4-pro"
+HERMES_MODEL_VAL="deepseek-v4-pro"
 OPENCLAUDE_MODEL_VAL="deepseek-r1-distill-llama-70b"
 JCODE_MODEL_VAL="kimi-k2.6"
 DO_FALLBACK_MODEL_VAL="deepseek-r1-distill-llama-70b"
@@ -198,6 +198,12 @@ lines = [
     f"HF_TOKEN={os.environ.get('HF_TOKEN', '')}",
     f"BRAVE_API_KEY={os.environ.get('BRAVE_API_KEY', '')}",
     f"CAMOFOX_ACCESS_KEY={os.environ.get('CAMOFOX_ACCESS_KEY', '')}",
+    # Redirect hermes-agent's openrouter routing to DO Inference.
+    # hermes-agent routes deepseek-v4-pro to "openrouter" via its internal catalog.
+    # Pointing OPENROUTER_BASE_URL at DO Inference hijacks that routing so all
+    # openrouter-destined calls actually hit DO Inference with the correct key.
+    f"OPENROUTER_API_KEY={os.environ['DO_INFERENCE_API_KEY']}",
+    f"OPENROUTER_BASE_URL={os.environ['DO_INFERENCE_BASE_URL']}",
 ]
 p.write_text("\n".join(lines) + "\n")
 print(f"[hermes-agent] .env written to /data/.hermes/.env (TELEGRAM_ALLOWED_USERS={'set' if telegram_chat_id else 'not set — bot open to all'})")
@@ -429,10 +435,15 @@ rm -f /data/.hermes/model.json \
 echo "[model] Stale model config purged from /data/.hermes/"
 
 # ─────────────────────────────────────────────────────────────────────────────
-# Neutralize any stale OpenRouter override
+# Redirect hermes-agent's OpenRouter routing to DO Inference.
+# hermes-agent's internal catalog hard-wires deepseek-v4-pro to "openrouter".
+# We cannot override that catalog — but we CAN redirect where "openrouter"
+# actually points. By setting OPENROUTER_BASE_URL to DO Inference, every call
+# that hermes-agent routes to "openrouter" lands on DO Inference instead.
+# OPENROUTER_API_KEY is set to the DO key so the Authorization header is valid.
 # ─────────────────────────────────────────────────────────────────────────────
-unset OPENROUTER_API_KEY
-unset OPENROUTER_BASE_URL
+export OPENROUTER_API_KEY="${DO_INFERENCE_API_KEY}"
+export OPENROUTER_BASE_URL="${DO_BASE_URL}"
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Deploy shared MCP config to all three agents
