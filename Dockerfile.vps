@@ -42,7 +42,8 @@
 #   FIX-D  poppler-utils added (pdftotext fallback for ingest-media)
 # =============================================================================
 
-FROM ubuntu:22.04
+# Pinned 2026-05-15. To update: docker buildx imagetools inspect ubuntu:22.04 | grep -B2 "linux/amd64" | grep Name
+FROM ubuntu:22.04@sha256:14be402d3f1eeeb5e7da73d3260322c68e7b51c88388f53e88eb21d6450bd520
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV PYTHONUNBUFFERED=1
@@ -208,13 +209,18 @@ RUN set -e; \
         "https://github.com/1jehuang/jcode/releases/download/v${JCODE_VER}/jcode-linux-x86_64.tar.gz" \
         | tar -xz -C /tmp/jcode-extract; \
     echo "[jcode] Tarball contents:"; find /tmp/jcode-extract -type f; \
-    JCODE_BIN=$(find /tmp/jcode-extract -type f \( -name 'jcode' -o -name 'jcode-linux-x86_64' \) ! -name '*.bin' | head -1); \
-    if [ -z "${JCODE_BIN}" ]; then \
-        echo "[jcode] ERROR: jcode binary not found in tarball"; \
-        exit 1; \
+    JCODE_WRAPPER=$(find /tmp/jcode-extract -type f -name 'jcode-linux-x86_64' ! -name '*.bin' | head -1); \
+    JCODE_REAL=$(find /tmp/jcode-extract -type f -name 'jcode-linux-x86_64.bin' | head -1); \
+    if [ -n "${JCODE_WRAPPER}" ] && [ -n "${JCODE_REAL}" ]; then \
+        mv "${JCODE_WRAPPER}" /usr/local/bin/jcode; \
+        mv "${JCODE_REAL}" /usr/local/bin/jcode-linux-x86_64.bin; \
+        chmod +x /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin; \
+    elif [ -n "${JCODE_REAL}" ]; then \
+        mv "${JCODE_REAL}" /usr/local/bin/jcode; \
+        chmod +x /usr/local/bin/jcode; \
+    else \
+        echo "[jcode] ERROR: jcode binary not found in tarball"; exit 1; \
     fi; \
-    mv "${JCODE_BIN}" /usr/local/bin/jcode; \
-    chmod +x /usr/local/bin/jcode; \
     find /tmp/jcode-extract -name '*.so*' -exec cp {} /usr/local/lib/ \; ; \
     ldconfig; \
     rm -rf /tmp/jcode-extract; \
