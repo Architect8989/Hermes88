@@ -11,12 +11,6 @@
       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}" },
       "shared": true
     },
-    "fetch": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-fetch/dist/index.js"],
-      "shared": true,
-      "description": "Fetch any web URL and return content — enables web browsing and research"
-    },
     "brave-search": {
       "command": "node",
       "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"],
@@ -35,10 +29,6 @@
       "command": "node",
       "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js"],
       "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}" }
-    },
-    "fetch": {
-      "command": "node",
-      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-fetch/dist/index.js"]
     },
     "brave-search": {
       "command": "node",
