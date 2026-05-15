@@ -47,13 +47,24 @@ check-env:
                 echo "[error] .env not found. Run: cp .env.example .env && nano .env"; \
                 exit 1; \
         fi
-        @for key in TELEGRAM_BOT_TOKEN DO_INFERENCE_API_KEY GITHUB_PAT; do \
+        @for key in TELEGRAM_BOT_TOKEN GITHUB_PAT; do \
                 val=$$(grep -E "^$${key}=" .env | cut -d= -f2- | tr -d '[:space:]'); \
                 if [ -z "$$val" ]; then \
                         echo "[error] $$key is missing or empty in .env"; \
                         exit 1; \
                 fi; \
         done
+        @deepseek=$$(grep -E "^DO_KEY_DEEPSEEK=" .env | cut -d= -f2- | tr -d '[:space:]'); \
+        legacy=$$(grep -E "^DO_INFERENCE_API_KEY=" .env | cut -d= -f2- | tr -d '[:space:]'); \
+        if [ -z "$$deepseek" ] && [ -z "$$legacy" ]; then \
+                echo "[error] Set DO_KEY_DEEPSEEK (preferred) or DO_INFERENCE_API_KEY (legacy) in .env"; \
+                exit 1; \
+        fi; \
+        if [ -n "$$deepseek" ]; then \
+                echo "[ok] Using per-model keys (DO_KEY_DEEPSEEK / DO_KEY_KIMI / DO_KEY_QWEN)"; \
+        else \
+                echo "[warn] Using legacy single-key mode (DO_INFERENCE_API_KEY). Consider migrating to 3 per-model keys."; \
+        fi
         @echo "[ok] .env looks good."
 
 # ── deploy — build image and start (first-time setup) ─────────────────────────

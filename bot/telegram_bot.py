@@ -307,6 +307,45 @@ def run_bounded(
     }
 
 
+def _notify_provider_switch(
+    from_provider: str,
+    to_provider: str,
+    step_context: str,
+    strikes_remaining: int,
+) -> None:
+    """Send a Telegram message when _self_heal switches to a fallback LLM provider.
+    Fires only if TELEGRAM_BOT_TOKEN and TELEGRAM_CHAT_ID are set — silently
+    skips otherwise so it never blocks the heal loop.
+    """
+    token   = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    chat_id = os.getenv("TELEGRAM_CHAT_ID", "")
+    if not token or not chat_id:
+        return
+
+    context_line = ""
+    if step_context:
+        first_line = step_context.splitlines()[0][:120]
+        context_line = f"\n\n<b>Last step:</b> <code>{first_line}</code>"
+
+    text = (
+        f"⚠️ <b>LLM provider switched</b>\n\n"
+        f"<b>From:</b> {from_provider}\n"
+        f"<b>To:</b>   {to_provider}\n"
+        f"<b>Strikes left:</b> {strikes_remaining}"
+        f"{context_line}\n\n"
+        f"Context preserved — task continuing from exact step."
+    )
+
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=8,
+        )
+    except Exception as exc:
+        print(f"[self-heal] provider-switch notify failed: {exc}", file=sys.stderr)
+
+
 def _self_heal(
     cmd: str, workdir: str, stderr: str, strikes_remaining: int,
     api_key: str, base_url: str, model: str,
@@ -375,10 +414,22 @@ def _self_heal(
         prev_passing=prev_str,
     )
 
-    for provider in providers:
+    active_provider_idx = 0
+
+    for idx, provider in enumerate(providers):
         if not provider["api_key"]:
             print(f"[self-heal] Skipping {provider['name']} — no API key set", file=sys.stderr)
             continue
+
+        # Notify owner via Telegram when switching to a fallback provider
+        # so rate-limit failovers are visible in real time.
+        if idx > 0:
+            _notify_provider_switch(
+                from_provider=providers[idx - 1]["name"],
+                to_provider=provider["name"],
+                step_context=step_context,
+                strikes_remaining=strikes_remaining,
+            )
 
         env = {
             **os.environ,

@@ -34,6 +34,12 @@ SUPERVISORCTL  = [
 BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "")
 CHAT_ID   = os.environ.get("TELEGRAM_CHAT_ID", "")
 
+# Optional processes — EXITED/FATAL state is expected and should NOT trigger
+# alerts. These are enhancement services that degrade gracefully when absent.
+#   jcode-server  — jcode swarm coordinator (optional, cargo install jcode)
+#   openclaw-gateway — multi-channel relay (disabled until channels configured)
+OPTIONAL_PROCESSES: set[str] = {"jcode-server", "openclaw-gateway"}
+
 # ── State ────────────────────────────────────────────────────────────────────
 last_alerted:  dict[str, float] = {}   # process → last alert timestamp
 last_state:    dict[str, str]   = {}   # process → last known state
@@ -97,6 +103,18 @@ def run() -> None:
 
         for name, state in states.items():
             prev = last_state.get(name)
+
+            # Skip optional processes — their EXITED state is expected and normal.
+            # jcode-server: optional swarm coordinator (not installed → stays RUNNING
+            #   via sleep infinity after the supervisord.conf fix).
+            # openclaw-gateway: disabled until channels are configured via onboard.
+            if name in OPTIONAL_PROCESSES:
+                print(
+                    f"[watchdog] {name} → {state} (optional — no alert)",
+                    flush=True,
+                )
+                last_state[name] = state
+                continue
 
             if state in ("FATAL", "EXITED"):
                 last_alert = last_alerted.get(name, 0)
