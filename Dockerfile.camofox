@@ -36,7 +36,7 @@
 #          -e CAMOFOX_ACCESS_KEY=your-secret-key rhodawk-camofox
 # =============================================================================
 
-FROM node:22-slim
+FROM node:26-slim
 
 # System packages aligned with the official jo-inc/camofox-browser Dockerfile.
 # node:22-slim is Debian Bookworm — package names differ from Ubuntu/Debian Bullseye:
