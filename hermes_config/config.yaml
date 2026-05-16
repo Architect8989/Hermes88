@@ -51,8 +51,24 @@ model:
       - timeout: true
     consecutive_failures_before_escalate: 1
     backoff_strategy: exponential
-    backoff_base_seconds: 2
-    backoff_max_seconds: 60
+    backoff_base_seconds: 10
+    backoff_max_seconds: 120
+    jitter: true
+
+# -- Provider retry (FIX-12)
+provider:
+  retry:
+    max_attempts: 5
+    initial_delay: 10
+    backoff_multiplier: 2.0
+    max_delay: 120
+    jitter: true
+
+# -- Agent call behaviour (FIX-12)
+agent:
+  tool_batching: true
+  max_tools_before_llm: 5
+  inter_call_delay: 3.0
 
 # -- Terminal tool ----------------------------------------------------------------
 terminal:
