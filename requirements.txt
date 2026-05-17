@@ -26,7 +26,7 @@ mcp>=1.0.0
 
 # ── gRPC stack (openclaude gRPC client / server stubs) ───────────────────────
 grpcio>=1.62.0
-grpcio-tools>=1.62.0
+grpcio-tools>=1.80.0
 protobuf>=4.25.0
 
 # ── OpenAI-compatible client ──────────────────────────────────────────────────
