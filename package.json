@@ -11,7 +11,7 @@
     "check-node": "node -e \"const v=process.versions.node.split('.');if(v[0]<20){console.error('ERROR: Node.js 20+ required, got '+process.versions.node);process.exit(1);}console.log('Node.js '+process.versions.node+' OK — Nullish Coalescing (??) supported');\""
   },
   "dependencies": {
-    "@gitlawb/openclaude": "0.10.0",
+    "@gitlawb/openclaude": "0.13.0",
     "@modelcontextprotocol/server-brave-search": "latest",
     "@modelcontextprotocol/server-fetch": "latest",
     "@modelcontextprotocol/server-filesystem": "latest",
