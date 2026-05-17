@@ -45,7 +45,7 @@ python-telegram-bot>=20.7
 huggingface_hub>=0.21.0
 
 # ── Media / document ingestion ────────────────────────────────────────────────
-PyMuPDF>=1.23.0
+PyMuPDF>=1.27.2.3
 pdfminer.six>=20221105
 pillow>=10.0.0
 
