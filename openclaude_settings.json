@@ -1,0 +1,64 @@
+{
+  "agentModels": {
+    "do-fast": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "${DO_INFERENCE_API_KEY}",
+      "model": "do-inference/deepseek-r1-distill-llama-70b"
+    },
+    "do-coder": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "${DO_INFERENCE_API_KEY}",
+      "model": "do-inference/deepseek-v4-pro"
+    },
+    "do-review": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "${DO_INFERENCE_API_KEY}",
+      "model": "do-inference/deepseek-v4-pro"
+    },
+    "do-reasoning": {
+      "base_url": "http://localhost:11434/v1",
+      "api_key": "${DO_INFERENCE_API_KEY}",
+      "model": "do-inference/deepseek-v4-pro"
+    }
+  },
+  "agentRouting": {
+    "Explore":           "do-fast",
+    "Analyze":           "do-fast",
+    "Plan":              "do-coder",
+    "Code":              "do-coder",
+    "Edit":              "do-coder",
+    "Implement":         "do-coder",
+    "Refactor":          "do-coder",
+    "Debug":             "do-coder",
+    "Fix":               "do-coder",
+    "Review":            "do-review",
+    "Test":              "do-review",
+    "Document":          "do-fast",
+    "Security":          "do-reasoning",
+    "Architect":         "do-reasoning",
+    "general-purpose":   "do-coder",
+    "default":           "do-coder"
+  },
+  "modelFallbackChain": [
+    "do-coder",
+    "do-fast",
+    "do-review"
+  ],
+  "retryConfig": {
+    "maxRetries": 3,
+    "backoffMs": [1000, 2000, 4000],
+    "retryOnStatusCodes": [429, 503, 502, 504]
+  },
+  "contextInjection": {
+    "injectSoulMd": true,
+    "soulMdPaths": [
+      "/data/.hermes/SOUL.md",
+      "/app/hermes_config/SOUL.md",
+      "/data/.openclaw/workspace/SOUL.md"
+    ],
+    "injectMemoryMd": true,
+    "memoryMdPaths": [
+      "/data/.hermes/memories/MEMORY.md"
+    ]
+  }
+}
