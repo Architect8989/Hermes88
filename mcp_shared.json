@@ -1,0 +1,39 @@
+{
+  "servers": {
+    "filesystem": {
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "/tmp/repos", "/data", "/tmp"],
+      "shared": true
+    },
+    "github": {
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}" },
+      "shared": true
+    },
+    "brave-search": {
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"],
+      "env": { "BRAVE_API_KEY": "${BRAVE_API_KEY}" },
+      "shared": true,
+      "optional": true,
+      "description": "Brave web search API — set BRAVE_API_KEY secret to enable"
+    }
+  },
+  "mcpServers": {
+    "filesystem": {
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-filesystem/dist/index.js", "/tmp/repos", "/data", "/tmp"]
+    },
+    "github": {
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-github/dist/index.js"],
+      "env": { "GITHUB_PERSONAL_ACCESS_TOKEN": "${GITHUB_PAT}" }
+    },
+    "brave-search": {
+      "command": "node",
+      "args": ["/usr/local/lib/node_modules/@modelcontextprotocol/server-brave-search/dist/index.js"],
+      "env": { "BRAVE_API_KEY": "${BRAVE_API_KEY}" }
+    }
+  }
+}

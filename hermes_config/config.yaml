@@ -1,0 +1,288 @@
+# hermes-agent config.yaml -- Rhodawk AI Peak Architecture v10.0
+# Path: $HERMES_HOME/config.yaml (expanded by init_and_start.sh)
+#
+# Schema follows hermes-agent cli-config.yaml.
+# Unknown keys are silently ignored; this file covers all peak capabilities.
+
+# -- Model configuration ----------------------------------------------------------
+model:
+  default: "${HERMES_MODEL}"
+  # hermes-agent's internal catalog maps deepseek-v4-pro to "openrouter".
+  # We do NOT override provider here — "openai" is not a valid provider name
+  # in hermes-agent's enum and causes "Unknown provider" fatal errors.
+  # Instead, OPENROUTER_BASE_URL and OPENROUTER_API_KEY in the .env file
+  # redirect all openrouter-destined calls to DO Inference at runtime.
+  routing:
+    reasoning: "${HERMES_MODEL}"
+    coding: "${OPENCLAUDE_MODEL}"
+    scaffolding: "${JCODE_MODEL}"
+    embedding: "text-embedding-3-small"
+  # 3-key per-model failover — each model has its own dedicated DO Inference API key.
+  # Same base URL (https://inference.do-ai.run/v1) for all three; different keys prevent
+  # one model's rate limit from blocking the others.
+  #
+  # Tier 1: deepseek-v4-pro   (DO_KEY_DEEPSEEK) — primary reasoning + tool calling
+  # Tier 2: kimi-k2.6         (DO_KEY_KIMI)     — fallback, kicks in on tier-1 429/503
+  # Tier 3: qwen3.5-397b-a17b (DO_KEY_QWEN)     — last resort, independent key + quota
+  #
+  # preserve_context: true — when tier N hits rate limits mid-task, tier N+1 receives
+  # the FULL conversation history (all tool calls, results, and partial step outputs)
+  # so it continues from exactly where tier N stopped, not from scratch.
+  failover:
+    enabled: true
+    preserve_context: true
+    chain:
+      - model: "deepseek-v4-pro"
+        provider: "openrouter"
+        base_url: "http://localhost:11434/v1"    # FIX-2A: was DO_INFERENCE_BASE_URL (bypassed proxy)
+        api_key: "${DO_KEY_DEEPSEEK}"
+      - model: "kimi-k2.6"
+        provider: "openrouter"
+        base_url: "http://localhost:11434/v1"    # FIX-2A: was DO_INFERENCE_BASE_URL (bypassed proxy)
+        api_key: "${DO_KEY_KIMI}"
+      - model: "qwen3.5-397b-a17b"
+        provider: "openrouter"
+        base_url: "http://localhost:11434/v1"    # FIX-2A: was DO_INFERENCE_BASE_URL (bypassed proxy)
+        api_key: "${DO_KEY_QWEN}"
+    triggers:
+      - status_code: 429
+      - status_code: 503
+      - status_code: 500
+      - timeout: true
+    consecutive_failures_before_escalate: 1
+    backoff_strategy: exponential
+    backoff_base_seconds: 10          # FIX-12: was 2s
+    backoff_max_seconds: 120          # FIX-12: was 60s
+    jitter: true                      # FIX-12: prevent thundering herd
+
+# -- Terminal tool ----------------------------------------------------------------
+terminal:
+  backend: "local"
+  cwd: "."
+  timeout: 7200
+  lifetime_seconds: 7200
+  docker_mount_cwd_to_workspace: false
+  max_background_processes: 10
+  process_cleanup_interval: 300
+
+# -- Persistent memory (enhanced with semantic layer) ------------------------------
+memory:
+  memory_enabled: true
+  user_profile_enabled: true
+  memory_char_limit: 16000
+  user_char_limit: 4000
+  nudge_interval: 10
+  flush_min_turns: 6
+  # Semantic memory engine (requires Redis Stack — see docker-compose.peak.yml)
+  semantic:
+    enabled: true
+    backend: "redis"
+    redis_url: "${REDIS_URL}"
+    index_name: "hermes:memory:vectors"
+    embedding_model: "text-embedding-3-small"
+    embedding_dimensions: 1536
+    similarity_metric: "cosine"
+    top_k: 10
+    similarity_threshold: 0.72
+    # Memory lifecycle
+    importance_scoring: true
+    temporal_decay_rate: 0.02
+    decay_half_life_days: 30
+    min_importance: 0.1
+    max_memories: 10000
+    # Auto-categorization
+    auto_tag: true
+    categories:
+      - code_change
+      - research
+      - decision
+      - task_outcome
+      - operator_preference
+      - system_event
+      - financial
+      - competitive_intel
+  # FIX Problem-9: Graceful degradation when Redis unavailable
+  # hermes-agent falls back to flat-file memory when Redis is unreachable.
+  graceful_degradation:
+    enabled: true
+    on_redis_unavailable: "flat_file"
+    flat_file_path: "/data/.hermes/memories/MEMORY.md"
+    log_degradation_warning: true
+
+# -- Auxiliary LLM (compression / summarization) ----------------------------------
+# Uses kimi-k2.6 key for compression — keeps deepseek key quota free for reasoning.
+auxiliary:
+  provider: "openrouter"
+  base_url: "http://localhost:11434/v1"    # FIX-2A: was DO_INFERENCE_BASE_URL (bypassed proxy)
+  api_key: "${DO_KEY_KIMI}"
+  model: "kimi-k2.6"
+  compression:
+    provider: "openrouter"
+    base_url: "http://localhost:11434/v1"  # FIX-2A: was DO_INFERENCE_BASE_URL (bypassed proxy)
+    api_key: "${DO_KEY_KIMI}"
+    model: "kimi-k2.6"
+
+# -- Context compression (aggressive for long sessions) ----------------------------
+compression:
+  enabled: true
+  threshold: 0.20
+  target_ratio: 0.20
+  protect_last_n: 30
+  strategy: "semantic_summary"
+  summary_model: "kimi-k2.6"
+  summary_provider: "openrouter"
+  summary_base_url: "http://localhost:11434/v1"  # FIX-2A: was DO_INFERENCE_BASE_URL (bypassed proxy)
+  summary_api_key: "${DO_KEY_KIMI}"
+  preserve_tool_results: true
+  preserve_code_blocks: true
+
+# -- Display configuration --------------------------------------------------------
+display:
+  tool_progress: "all"
+  streaming: true
+  interim_assistant_messages: true
+  cleanup_progress: false
+  compact: false
+  show_reasoning: false
+  busy_input_mode: interrupt
+  background_process_notifications: all
+
+# -- YOLO mode (operator approval for dangerous commands)
+# FIX Problem-6: Setting this to false enables ActionRequired for dangerous tool calls.
+# hermes-agent surfaces dangerous commands via its native approval mechanism
+# (Telegram inline buttons "Approve" / "Deny") before executing.
+# Set to true only if you have full trust in the LLM's judgment.
+# SAFETY DEFAULT: yolo must be false.
+# yolo: true means openclaude executes ALL shell commands without operator
+# approval. For a system running against arbitrary/untrusted repos this is
+# a critical security failure — the LLM can run rm -rf, curl | bash, git push
+# --force, etc. with no human in the loop.
+#
+# Set to true ONLY if:
+#   a) The target repo is fully trusted and you accept the risk, OR
+#   b) You have implemented the ActionRequired bidirectional approval loop
+#      (proto ActionRequired → Telegram/Slack inline buttons → UserInput reply)
+#      so a human approves dangerous commands before they execute.
+#
+# With yolo: false, openclaude uses --permission-mode plan (read-only).
+# See skills/openclaude_grpc/server.py for the full safety model.
+yolo: false
+
+# -- Session management -----------------------------------------------------------
+session_reset:
+  on_command: "/new"
+  on_platform_disconnect: false
+
+# -- Task Queue -------------------------------------------------------------------
+task_queue:
+  enabled: true
+  backend: "redis"
+  redis_url: "${REDIS_URL}"
+  queue_name: "hermes:tasks"
+  result_queue: "hermes:results"
+  worker_count: 5
+  task_timeout: 3600
+  result_ttl: 86400
+  # FIX Problem-9: Graceful degradation when Redis unavailable
+  graceful_degradation: true
+  on_redis_unavailable: "in_memory_queue"
+  retry_policy:
+    max_retries: 3
+    backoff_base: 5
+    backoff_multiplier: 2
+  priorities:
+    critical: 0
+    high: 1
+    normal: 2
+    low: 3
+    background: 4
+
+# -- Event Bus --------------------------------------------------------------------
+event_bus:
+  enabled: true
+  backend: "redis"
+  redis_url: "${REDIS_URL}"
+  graceful_degradation: true
+  channels:
+    events: "hermes:events"
+    tasks: "hermes:tasks:events"
+    alerts: "hermes:alerts"
+    health: "hermes:health"
+  publish_events:
+    - task_started
+    - task_completed
+    - task_failed
+    - tool_called
+    - model_fallback
+    - memory_written
+    - proactive_trigger
+    - system_alert
+
+# -- Cron Engine (APScheduler-based) -----------------------------------------------
+cron:
+  enabled: true
+  engine: "apscheduler"
+  config_dir: "/data/.hermes/cron"
+  timezone: "UTC"
+  job_store: "redis"
+  job_store_url: "${REDIS_URL}"
+  job_store_fallback: "sqlite"
+  missed_grace_time: 900
+  max_concurrent: 3
+  coalesce: true
+  default_executor: "threadpool"
+  executor_workers: 5
+
+# -- Proactive Intelligence --------------------------------------------------------
+proactive:
+  enabled: true
+  scan_interval_seconds: 300
+  sources:
+    github:
+      enabled: true
+      repos:
+        - "Architect8989/Hermes88"
+      events:
+        - workflow_failure
+        - security_advisory
+        - new_issue
+        - pr_review_requested
+    system:
+      enabled: true
+      checks:
+        - disk_usage_threshold: 85
+        - memory_usage_threshold: 90
+        - process_health: true
+        - container_health: true
+    financial:
+      enabled: "${STRIPE_API_KEY:+true}"
+      provider: stripe
+      alerts:
+        - payment_failed
+        - subscription_change
+        - low_balance
+    calendar:
+      enabled: "${GOOGLE_CALENDAR_CREDENTIALS:+true}"
+      lookahead_hours: 24
+      reminder_minutes: [60, 15]
+
+# -- Sandbox configuration ---------------------------------------------------------
+sandbox:
+  enabled: true
+  manager_url: "http://sandbox-manager:8090"
+  default_image: "rhodawk-sandbox:latest"
+  max_concurrent: 5
+  timeout: 600
+  resource_limits:
+    memory: "512m"
+    cpu: "1.0"
+    disk: "2g"
+    network: "none"
+  allowed_for:
+    - untrusted_code
+    - security_audit
+    - dependency_install
+    - test_execution
+
+# -- MCP servers (populated at runtime by init_and_start.sh) -----------------------
+mcp_servers: {}

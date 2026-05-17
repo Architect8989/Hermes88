@@ -1,0 +1,144 @@
+# =============================================================================
+# Rhodawk AI — Hermes v8.0 (CEO-Grade Second Brain)
+# docker compose deployment
+#
+# FIX Problem-9: Redis Stack is now a first-class service in both
+# docker-compose.yml (VPS/simple) AND docker-compose.peak.yml (full stack).
+# Previously, memory.py/task_engine.py/event_bus all imported redis but the
+# plain docker-compose.yml had NO redis service — a silent startup bomb.
+#
+# Both files now define the redis service and inject REDIS_URL automatically,
+# so the semantic memory, task queue, event bus, and cron job store all work
+# out of the box without any manual env var setup.
+#
+# Deploy:
+#   cp .env.example .env && nano .env   # fill in all required secrets
+#   docker compose up -d --build
+#
+# Manage:
+#   docker compose logs -f              # stream logs
+#   docker compose ps                   # container status
+#   docker compose restart              # restart bot
+#   docker compose down                 # stop
+#   docker compose up -d --build       # update after git pull
+# =============================================================================
+
+services:
+  # ── Redis Stack (vector search + pub/sub + sorted sets) ─────────────────────
+  # FIX Problem-9: Redis Stack is now included in docker-compose.yml so that:
+  #   - Memory engine can use Redis vector search
+  #   - Task queue has a broker for background tasks
+  #   - Event bus can publish/subscribe to events
+  #   - APScheduler cron engine has a job store
+  #
+  # Graceful degradation: if redis is unavailable at startup (e.g., on very
+  # memory-constrained VPS), hermes falls back to:
+  #   - Flat-file memory (MEMORY.md)
+  #   - In-process queue
+  #   - Polling-based events
+  # This is configured in hermes_config/config.yaml (graceful_degradation sections).
+  redis:
+    image: redis/redis-stack-server:latest
+    container_name: hermes-redis
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:6379:6379"   # Redis protocol — bound to localhost only
+      - "127.0.0.1:8001:8001"   # RedisInsight web UI — localhost only
+    volumes:
+      - redis-data:/data
+    environment:
+      - REDIS_ARGS=--save 900 1 --save 300 10 --appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.vps
+    image: rhodawk-hermes:latest
+    pull_policy: never
+    container_name: hermes
+    env_file: .env
+    environment:
+      # Model assignments — override whatever init_and_start.sh sets so
+      # docker compose up -d (no rebuild) picks these up immediately.
+      - HERMES_MODEL=deepseek-v4-pro
+      - OPENCLAUDE_MODEL=deepseek-r1-distill-llama-70b
+      - JCODE_MODEL=kimi-k2.6
+      # Camofox is a sibling container — never localhost from inside hermes
+      - CAMOFOX_HOST=camofox
+      - CAMOFOX_PORT=9377
+      # FIX Problem-9: Redis URL auto-injected — points to sibling redis container
+      - REDIS_URL=redis://redis:6379/0
+    depends_on:
+      redis:
+        condition: service_healthy
+      camofox:
+        condition: service_healthy
+    volumes:
+      # Persists across restarts: SQLite memory DB, hermes config, sessions, logs
+      - hermes-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - supervisorctl
+        - -c
+        - /etc/supervisor/conf.d/rhodawk.conf
+        - status
+        - hermes-gateway
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 90s
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  camofox:
+    build:
+      context: .
+      dockerfile: Dockerfile.camofox
+    container_name: camofox
+    ports:
+      - "9377:9377"
+    environment:
+      - CAMOFOX_ACCESS_KEY=${CAMOFOX_ACCESS_KEY}
+      - CAMOFOX_PORT=9377
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9377/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    volumes:
+      - camofox_data:/home/node/.camofox
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+volumes:
+  hermes-data:
+    driver: local
+  redis-data:
+    driver: local
+  camofox_data:
+    driver: local
+
+networks:
+  hermes-net:
+    driver: bridge

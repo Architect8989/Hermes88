@@ -1,0 +1,289 @@
+# =============================================================================
+# Rhodawk AI — Hermes General-Purpose Autonomous Agent
+# VPS Single-Click Deployment Dockerfile  v8.0
+#
+# Usage:
+#   docker build -f Dockerfile.vps -t rhodawk-hermes .
+#   docker run -d --name hermes --env-file .env -v hermes-data:/data \
+#     --restart unless-stopped rhodawk-hermes
+#
+# Or with docker compose:
+#   docker compose up -d
+#
+# Required env vars (copy .env.example → .env and fill in values):
+#   TELEGRAM_BOT_TOKEN   — from @BotFather on Telegram
+#   DO_INFERENCE_API_KEY — from https://cloud.digitalocean.com/gen-ai — all agents
+#   GITHUB_PAT           — GitHub PAT with repo + workflow scopes
+#
+# Optional:
+#   HF_TOKEN             — HuggingFace write token (only for HF repo push)
+#   BRAVE_API_KEY        — Brave Search API key (enables web search for Hermes)
+#
+# Persistent data:
+#   /data/               — mount a named volume here to survive restarts
+#                          Stores: hermes config, memories, cron, sessions, logs
+#
+# Changes from v7.0 → v8.0 (full production fix pass):
+#   FIX-A  hermes-agent: install from GitHub source, not PyPI (not on PyPI)
+#          `pip install "hermes-agent[...] @ git+https://github.com/..."
+#   FIX-B  jcode: correct release tarball name was jcode-linux-x86_64.tar.gz,
+#          not jcode-x86_64-unknown-linux-musl.tar.gz (always 404'd before)
+#   FIX-C  openclaude: symlink binary into /usr/local/bin/ so shutil.which()
+#          resolves it — without this the gRPC server spawns nothing
+#
+# Previous changes (v6.1 → v7.0):
+#   FIX-5  duckduckgo-search installed for zero-API-key web search fallback
+#
+# Previous changes (v6.0 → v6.1):
+#   FIX-A  Use requirements.txt instead of inline pip install for reproducibility
+#   FIX-B  Node.js explicitly pinned to 24.x — prevents ?? SyntaxError from
+#          falling back to Ubuntu's system Node.js 12.x
+#   FIX-C  chmod +x main.py added
+#   FIX-D  poppler-utils added (pdftotext fallback for ingest-media)
+# =============================================================================
+
+# Pinned 2026-05-15. To update: docker buildx imagetools inspect ubuntu:22.04 | grep -B2 "linux/amd64" | grep Name
+FROM ubuntu:22.04@sha256:14be402d3f1eeeb5e7da73d3260322c68e7b51c88388f53e88eb21d6450bd520
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV PYTHONUNBUFFERED=1
+
+# ── System packages ────────────────────────────────────────────────────────────
+# Base image is ubuntu:22.04 (Ubuntu Jammy Jellyfish), NOT Debian Bookworm.
+# Debian Bookworm package renames (e.g. libasound2 → libasound2t64, libssl1.x
+# → libssl3) do NOT apply to Ubuntu 22.04 — Ubuntu uses its own package naming
+# and all names below are verified correct for ubuntu:22.04.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    python3.11 python3.11-dev python3-pip \
+    curl wget git supervisor \
+    build-essential ca-certificates \
+    libmupdf-dev poppler-utils \
+    jq \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── ripgrep 14.1.0 — required by openclaude for codebase search ───────────────
+RUN curl -LO https://github.com/BurntSushi/ripgrep/releases/download/14.1.0/ripgrep_14.1.0-1_amd64.deb \
+    && dpkg -i ripgrep_14.1.0-1_amd64.deb \
+    && rm ripgrep_14.1.0-1_amd64.deb
+
+# ── Node.js 24 ─────────────────────────────────────────────────────────────────
+# FIX-B: Explicitly install Node.js 24.x from NodeSource. Ubuntu 22.04's default
+# APT provides Node.js 12.x, which does NOT support the Nullish Coalescing (??)
+# operator used by @modelcontextprotocol/* MCP servers and @gitlawb/openclaude.
+# Node.js 14+ is the minimum; 24.x is recommended and tested.
+RUN curl -fsSL https://deb.nodesource.com/setup_24.x | bash - \
+    && apt-get install -y nodejs \
+    && npm config set prefix /usr/local \
+    && node --version \
+    && npm --version \
+    && echo "[node] $(node --version) installed — Nullish Coalescing (??) supported"
+
+# ── Bun runtime (required by @gitlawb/openclaude for gRPC TypeScript scripts) ─
+# openclaude's dev:grpc script calls `bun run scripts/start-grpc.ts`.
+# Without bun, openclaude-grpc crashes with "bun: not found" (exit 127).
+RUN npm install -g bun \
+    && bun --version && echo "[bun] installed OK"
+
+# ── Python 3.11 aliases ────────────────────────────────────────────────────────
+RUN update-alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1 \
+    && update-alternatives --install /usr/bin/python python /usr/bin/python3.11 1 \
+    && pip3 install --upgrade pip setuptools wheel
+
+# ── Agent 1: HERMES-AGENT — installed from GitHub source (NousResearch) ──────
+# FIX-A: hermes-agent (github.com/NousResearch/hermes-agent, 149K ★) is NOT
+# published on PyPI as a standalone pip-installable package. Both `pip install
+# hermes-agent>=0.10.0` attempts in v7.0 silently failed (No matching
+# distribution found), leaving the bot running the stripped gateway/run.py
+# fallback with no memory, no skills, no cron, and no multi-channel support.
+#
+# Correct install: pip install from the GitHub source URL using PEP 440
+# direct references ("@ git+https://..."). pip clones the repo, runs
+# setuptools, and installs the `hermes` CLI entry point + all Python modules.
+#
+# Extras:
+#   messaging — Telegram, Discord, Slack, WhatsApp, Signal, Email gateway
+#   pty       — seven terminal backends (local, Docker, SSH, Modal, Daytona…)
+#   mcp       — Model Context Protocol server support (filesystem, github, …)
+#   acp       — Agent Communication Protocol (openclaw ↔ hermes inter-agent)
+#
+# After this step: `hermes --version` and `hermes gateway` are available.
+# The `hermes` binary is installed into the pip entry_points scripts dir
+# (typically /usr/local/bin/hermes). supervisord calls `hermes gateway`.
+RUN pip3 install --no-cache-dir \
+    "hermes-agent[messaging,pty,mcp,acp] @ git+https://github.com/NousResearch/hermes-agent.git" \
+    && hermes --version \
+    && echo "[hermes-agent] installed from source — binary at $(which hermes)"
+
+# ── Remaining Python dependencies from requirements.txt ───────────────────────
+# hermes-agent base already installed above; this adds:
+#   requests, aiohttp, aiofiles — HTTP clients
+#   python-telegram-bot         — Telegram SDK
+#   huggingface_hub             — HF push chain
+#   PyMuPDF, pdfminer.six, pillow — media ingestion
+#   grpcio, grpcio-tools, protobuf — openclaude gRPC client
+#   mcp                         — MCP client
+#   duckduckgo-search            — FIX-5: zero-key web search fallback
+COPY requirements.txt /tmp/requirements.txt
+RUN pip3 install --no-cache-dir -r /tmp/requirements.txt
+
+# ── FIX-5: Ensure duckduckgo-search is always available (zero API key needed) ─
+# Belt-and-suspenders: also in requirements.txt, but explicit here so container
+# builds that skip requirements.txt (e.g. --no-install-recommends paths) still work.
+RUN pip3 install --no-cache-dir "duckduckgo-search>=6.0.0" \
+    && python3 -c "from duckduckgo_search import DDGS; print('[ddg] duckduckgo-search OK')"
+
+# ── Agent 2: OPENCLAUDE — cloned from GitHub source ───────────────────────────
+# FIX-C: After `bun install`, openclaude's CLI binary lives at
+#   /opt/openclaude/bin/openclaude   (declared in package.json: "bin":{"openclaude":"./bin/openclaude"})
+# Without a symlink into PATH, shutil.which("openclaude") returns None and the
+# Python gRPC server at skills/openclaude_grpc/server.py fails to spawn it.
+# The symlink makes the real openclaude binary callable system-wide.
+#
+# Note: scripts/start-grpc.ts does NOT exist in the openclaude repo — it is a
+# CLI coding agent, not a gRPC service. supervisord always falls through to the
+# Python gRPC wrapper (skills/openclaude_grpc/server.py), which correctly spawns
+# `openclaude --print --no-tty --message "TASK"` as a subprocess. Now that the
+# binary is in PATH, this wrapper actually calls the real openclaude agent.
+#
+# The detectStubLeaks patch is applied with a warning-only failure (|| true) so
+# that newer openclaude versions that removed the function don't break the build.
+RUN git clone --depth=1 https://github.com/Gitlawb/openclaude.git /opt/openclaude \
+    && cd /opt/openclaude \
+    && bun install \
+    && python3 -c "import re,sys,pathlib; f=pathlib.Path('src/entrypoints/sdk/index.ts'); sys.exit(0) if not f.exists() else None; t=f.read_text(); p=re.sub(r'^detectStubLeaks\(\);?$','// detectStubLeaks() // patched: Bun v1.3 TDZ bug',t,flags=re.MULTILINE); f.write_text(p) if p!=t else None; print('[openclaude] Patched' if p!=t else '[openclaude] detectStubLeaks patch not needed')" \
+    && ln -sf /opt/openclaude/bin/openclaude /usr/local/bin/openclaude \
+    && openclaude --version 2>/dev/null | head -1 \
+    && echo "[openclaude] installed from source — binary at $(which openclaude)" \
+    || echo "[WARN] openclaude source unavailable — Python gRPC server fallback will be used (check network)"
+
+# ── Agent 3: OPENCLAW — openclaw/openclaw (non-critical) ──────────────────────
+RUN npm install -g openclaw@latest 2>/dev/null || echo "[openclaw] install skipped (non-critical)"
+
+# ── Agent 4: JCODE — real binary will be downloaded after COPY . /app/ ────────
+# FIX-B: Placeholder comment retained for build-layer ordering clarity.
+# The actual jcode binary install happens AFTER `COPY . /app/` below so that
+# the download step benefits from the full environment (curl, ca-certs, jq).
+
+# ── MCP servers — shared across all 3 agents ──────────────────────────────────
+# Install each server individually with retry + graceful failure so a single
+# transient npm registry error does not abort the entire build.
+# filesystem + github are critical; fetch + brave-search are optional.
+RUN npm config set fetch-retry-mintimeout 20000 \
+    && npm config set fetch-retry-maxtimeout 120000 \
+    && npm config set fetch-retries 5
+RUN npm install -g @modelcontextprotocol/server-filesystem \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-filesystem) \
+    && echo "[mcp] server-filesystem OK"
+RUN npm install -g @modelcontextprotocol/server-github \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-github) \
+    && echo "[mcp] server-github OK"
+RUN npm install -g @modelcontextprotocol/server-fetch \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-fetch) \
+    || echo "[mcp] server-fetch install failed (non-critical — skipping)"
+RUN npm install -g @modelcontextprotocol/server-brave-search \
+    || (sleep 10 && npm install -g @modelcontextprotocol/server-brave-search) \
+    || echo "[mcp] server-brave-search install failed (non-critical — skipping)"
+
+# ── App structure ───────────────────────────────────────────────────────────────
+WORKDIR /app
+COPY . /app/
+
+# ── Install jcode real binary from GitHub releases (1jehuang/jcode) ───────────
+# FIX-B: The v7.0 download used jcode-x86_64-unknown-linux-musl.tar.gz which
+# does not exist in any jcode release. The real asset name is:
+#   jcode-linux-x86_64.tar.gz  (verified against GitHub releases API)
+#
+# Safe extraction pattern: extract to /tmp/jcode-extract/, then `find` the
+# binary by name (tarball may contain a bare file OR a subdirectory). This is
+# robust against upstream tarball structure changes.
+#
+# Fallback: if the GitHub release download fails (network outage, rate limit),
+# install via the official install script which handles retries internally.
+# We do NOT fall back to `cargo install jcode` — that requires a full Rust
+# toolchain (~1GB) and takes 20+ minutes. The install script is faster.
+RUN set -e; \
+    JCODE_VER=$(curl -fsSL https://api.github.com/repos/1jehuang/jcode/releases/latest \
+        | grep '"tag_name"' | head -1 | cut -d'"' -f4 | sed 's/^v//'); \
+    echo "[jcode] Installing real binary v${JCODE_VER} from GitHub releases"; \
+    mkdir -p /tmp/jcode-extract; \
+    curl -fsSL \
+        "https://github.com/1jehuang/jcode/releases/download/v${JCODE_VER}/jcode-linux-x86_64.tar.gz" \
+        | tar -xz -C /tmp/jcode-extract; \
+    echo "[jcode] Tarball contents:"; find /tmp/jcode-extract -type f; \
+    JCODE_WRAPPER=$(find /tmp/jcode-extract -type f -name 'jcode-linux-x86_64' ! -name '*.bin' | head -1); \
+    JCODE_REAL=$(find /tmp/jcode-extract -type f -name 'jcode-linux-x86_64.bin' | head -1); \
+    if [ -n "${JCODE_WRAPPER}" ] && [ -n "${JCODE_REAL}" ]; then \
+        mv "${JCODE_WRAPPER}" /usr/local/bin/jcode; \
+        mv "${JCODE_REAL}" /usr/local/bin/jcode-linux-x86_64.bin; \
+        chmod +x /usr/local/bin/jcode /usr/local/bin/jcode-linux-x86_64.bin; \
+    elif [ -n "${JCODE_REAL}" ]; then \
+        mv "${JCODE_REAL}" /usr/local/bin/jcode; \
+        chmod +x /usr/local/bin/jcode; \
+    else \
+        echo "[jcode] ERROR: jcode binary not found in tarball"; exit 1; \
+    fi; \
+    find /tmp/jcode-extract -name '*.so*' -exec cp {} /usr/local/lib/ \; ; \
+    ldconfig; \
+    rm -rf /tmp/jcode-extract; \
+    jcode --version; \
+    echo "[jcode] v${JCODE_VER} binary installed at $(which jcode)" \
+    || ( \
+        echo "[jcode] GitHub release download failed — falling back to official install script"; \
+        curl -fsSL https://raw.githubusercontent.com/1jehuang/jcode/master/scripts/install.sh | bash; \
+        jcode --version; \
+        echo "[jcode] installed via official install script OK"; \
+    )
+
+# ── Generate OpenClaude gRPC Python stubs from proto ──────────────────────────
+# Proto source: openclaude_grpc/openclaude.proto (top-level dir, shipped in-repo)
+# Stubs output: skills/openclaude_grpc/ so client.py + server.py can find them via
+#   sys.path.insert(0, "/app/skills/openclaude_grpc")
+RUN python3 -m grpc_tools.protoc \
+    -I/app/openclaude_grpc \
+    --python_out=/app/skills/openclaude_grpc \
+    --grpc_python_out=/app/skills/openclaude_grpc \
+    /app/openclaude_grpc/openclaude.proto \
+    && echo "[grpc] OpenClaude stubs generated in /app/skills/openclaude_grpc/ OK"
+
+# ── Git global config ───────────────────────────────────────────────────────────
+RUN git config --global user.email "hermes@rhodawk.ai" \
+    && git config --global user.name "Hermes Bot" \
+    && git config --global safe.directory "*"
+
+# ── Runtime directories ─────────────────────────────────────────────────────────
+# /data/ is mounted as a Docker named volume — persists across container restarts.
+# /tmp/repos is ephemeral scratch space for cloned repos.
+RUN mkdir -p /tmp/repos /var/log /root/.openclaw /root/.claude /root/.jcode
+
+# /data/ is declared as a volume so Docker manages its lifecycle.
+# Always mount with: -v hermes-data:/data
+VOLUME ["/data"]
+
+# ── Script permissions ──────────────────────────────────────────────────────────
+RUN chmod +x /app/scripts/init_and_start.sh \
+    && chmod +x /app/bot/telegram_bot.py \
+    && chmod +x /app/main.py
+
+# ── Force-reinstall python-telegram-bot LAST ──────────────────────────────────
+# hermes-agent or its transitive deps can install a bare `telegram` package from
+# PyPI that shadows python-telegram-bot's `telegram` namespace. When gateway/run.py
+# does `from telegram import Update`, Python resolves the wrong package and crashes
+# with ImportError, putting hermes-gateway into a FATAL crash-loop (bot goes deaf).
+# Running force-reinstall as the very last pip step guarantees the correct
+# python-telegram-bot owns the `telegram` namespace. The verify step makes any
+# namespace conflict visible at build time rather than silently at runtime.
+RUN pip3 install --no-cache-dir --force-reinstall "python-telegram-bot>=20.7" \
+    && python3 -c "from telegram.ext import Application; print('[ptb] python-telegram-bot namespace OK')"
+
+# ── supervisord config ──────────────────────────────────────────────────────────
+COPY supervisord.conf /etc/supervisor/conf.d/rhodawk.conf
+
+# ── Health check ────────────────────────────────────────────────────────────────
+# Validates the supervisord process is running and the hermes-gateway is alive.
+HEALTHCHECK --interval=30s --timeout=10s --retries=3 --start-period=60s \
+    CMD supervisorctl -c /etc/supervisor/conf.d/rhodawk.conf status hermes-gateway \
+        | grep -q "RUNNING" || exit 1
+
+EXPOSE 7860
+
+CMD ["/app/scripts/init_and_start.sh"]

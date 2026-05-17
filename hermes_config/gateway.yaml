@@ -1,0 +1,267 @@
+# hermes-agent gateway configuration -- Rhodawk AI Peak Architecture v10.0
+# Path: /data/.hermes/gateway.yaml (copied and expanded by init_and_start.sh)
+#
+# This file configures hermes-agent's built-in gateway runner.
+# All API keys come from environment (exported in init_and_start.sh).
+# Template variables ${VAR} are expanded at deploy time by Python string.Template.
+
+# -- Agent model routing -------------------------------------------------------
+# Model switching is handled entirely by the rate-limit proxy at localhost:11434.
+# hermes-agent always talks to the proxy (OPENROUTER_BASE_URL in supervisord env).
+# The proxy rewrites the request body + Authorization header per tier:
+#   Tier 1: deepseek-v4-pro  (DO_KEY_DEEPSEEK)
+#   Tier 2: kimi-k2.6        (DO_KEY_KIMI)      — proxy switches on persistent 429
+#   Tier 3: qwen3.5-397b-a17b (DO_KEY_QWEN)     — proxy switches on persistent 429
+# hermes-agent always gets 200 back (or 503 after all tiers exhausted).
+# It never sees a 429 and never needs to know a model switch occurred.
+agent:
+  provider: "openrouter"
+  model: "deepseek-v4-pro"
+  # No fallback_model / fallback_tier2_model — proxy owns model switching.
+  # Having both gateway failover AND proxy failover created conflicting logic.
+
+  # Behaviour
+  max_tokens: 16384
+  temperature: 0.05
+  yolo_mode: false
+  timeout: 1800
+  gateway_timeout: 7200
+
+  # Rate limiting — short backoff since proxy absorbs 429s before they reach here.
+  # If the proxy exhausts all tiers it returns 503, not 429, so these rarely fire.
+  rate_limit_retry: false
+  rate_limit_max_retries: 0
+  rate_limit_backoff_base: 2
+  rate_limit_backoff_max: 30
+
+  # Soul / persona
+  soul_path: "/data/.hermes/SOUL.md"
+
+  # Auxiliary model for compression/summarization.
+  # Uses kimi-k2.6 (own key) — keeps deepseek key quota reserved for reasoning.
+  auxiliary_provider: "openrouter"
+  auxiliary_model: "kimi-k2.6"
+
+  # Context management (maximized for modern deepseek models)
+  context_window_limit: 120000
+  max_history_messages: 100
+  context_compression_enabled: true
+  context_compression_threshold: 0.20
+  context_compression_target: 0.25
+
+  # Skills + Memory + Sessions
+  skills_dir: "/data/.hermes/skills"
+  memory_dir: "/data/.hermes/memories"
+  sessions_dir: "/data/.hermes/sessions"
+
+  # Event-driven hooks
+  event_bus_url: "${REDIS_URL}"
+  event_bus_channel: "hermes:events"
+  task_queue_url: "${REDIS_URL}"
+  task_queue_name: "hermes:tasks"
+
+  # Proactive intelligence
+  proactive_enabled: true
+  proactive_scan_interval: 300
+  proactive_channels:
+    - github_events
+    - system_health
+    - scheduled_tasks
+    - security_advisories
+
+# -- Telegram platform ----------------------------------------------------------
+platforms:
+  telegram:
+    enabled: true
+    token: "${TELEGRAM_BOT_TOKEN}"
+    polling: true
+    parse_mode: null
+    max_message_length: 4000
+    text_batch_delay_seconds: 0.6
+    reply_to_mode: first
+    allowed_users: "${TELEGRAM_ALLOWED_USERS}"
+    admin_chat_id: "${TELEGRAM_CHAT_ID}"
+    # Slash commands registered with Telegram BotFather.
+    # Format: plain list of command names (no leading slash).
+    # These are sent to Telegram's setMyCommands API on startup so the
+    # bot's command menu is populated. They are also forwarded to the LLM.
+    commands:
+      - start
+      - status
+      - new
+      - stop
+      - ratelimit
+    # Streaming responses (progressive updates while processing)
+    streaming_enabled: true
+    streaming_interval: 2.0
+    # Voice message handling
+    voice_enabled: true
+    voice_model: "whisper-large-v3"
+    voice_language: "en"
+
+# -- Command routing (root-level — hermes-agent reads this from the gateway config root)
+# unknown_command_passthrough: forward unrecognized /slash commands to the LLM
+# instead of returning the hard-coded "Unknown command" rejection.
+# passthrough_slash_commands mirrors the key name used in some hermes-agent builds.
+unknown_command_passthrough: true
+passthrough_slash_commands: true
+
+# -- Webhook endpoints -----------------------------------------------------------
+webhooks:
+  enabled: true
+  port: 8080
+  host: "0.0.0.0"
+  endpoints:
+    github:
+      path: "/webhooks/github"
+      secret: "${GITHUB_WEBHOOK_SECRET}"
+      events:
+        - push
+        - pull_request
+        - issues
+        - workflow_run
+        - security_advisory
+        - dependabot_alert
+    stripe:
+      path: "/webhooks/stripe"
+      secret: "${STRIPE_WEBHOOK_SECRET}"
+      events:
+        - invoice.payment_succeeded
+        - invoice.payment_failed
+        - subscription.updated
+    system:
+      path: "/webhooks/system"
+      secret: "${SYSTEM_WEBHOOK_SECRET}"
+      events:
+        - health_alert
+        - disk_warning
+        - memory_warning
+        - process_crash
+
+# -- Tool configuration (expanded) -----------------------------------------------
+tools:
+  terminal:
+    env: local
+    max_foreground_timeout: 7200
+    max_background_processes: 10
+    passthrough_env:
+      - GITHUB_PAT
+      - HF_TOKEN
+      - DO_INFERENCE_API_KEY
+      - DO_INFERENCE_BASE_URL
+      - HERMES_MODEL
+      - OPENCLAUDE_MODEL
+      - JCODE_MODEL
+      - DO_FALLBACK_MODEL
+      - OPENAI_API_KEY
+      - OPENAI_BASE_URL
+      - OPENAI_MODEL
+      - CLAUDE_CODE_USE_OPENAI
+      - HERMES_YOLO_MODE
+      - BRAVE_API_KEY
+      - CAMOFOX_ACCESS_KEY
+      - REDIS_URL
+      - STRIPE_API_KEY
+      - GOOGLE_CALENDAR_CREDENTIALS
+      - IMAP_HOST
+      - IMAP_USER
+      - IMAP_PASSWORD
+      - SMTP_HOST
+      - SMTP_USER
+      - SMTP_PASSWORD
+  web_fetch:
+    enabled: true
+    timeout: 30
+    max_size: 10485760
+  web_search:
+    enabled: true
+    providers:
+      - duckduckgo
+      - brave
+    fallback_order:
+      - brave
+      - duckduckgo
+  camofox_browse:
+    enabled: true
+    host: "${CAMOFOX_HOST}"
+    port: "${CAMOFOX_PORT}"
+    access_key: "${CAMOFOX_ACCESS_KEY}"
+    default_wait: 3
+    max_sessions: 50
+
+# -- Task queue integration -------------------------------------------------------
+task_queue:
+  enabled: true
+  backend: redis
+  url: "${REDIS_URL}"
+  queue_name: "hermes:tasks"
+  result_ttl: 86400
+  max_workers: 5
+  priority_levels:
+    critical: 0
+    high: 1
+    normal: 2
+    low: 3
+    background: 4
+
+# -- Cron / scheduled tasks -------------------------------------------------------
+cron:
+  enabled: true
+  engine: apscheduler
+  config_dir: "/data/.hermes/cron"
+  timezone: "UTC"
+  missed_job_grace: 900
+  max_concurrent_jobs: 3
+
+# -- Session management -----------------------------------------------------------
+sessions:
+  reset_on_command: true
+  persist: true
+  idle_evict_seconds: 86400
+  max_sessions: 100
+  compression_after_messages: 50
+
+# -- Memory configuration ---------------------------------------------------------
+memory:
+  backend: hybrid
+  semantic:
+    enabled: true
+    embedding_model: "text-embedding-3-small"
+    embedding_provider: "openai"
+    embedding_base_url: "${DO_INFERENCE_BASE_URL}"
+    embedding_api_key: "${DO_INFERENCE_API_KEY}"
+    vector_store: redis
+    vector_index: "hermes:memory:vectors"
+    similarity_threshold: 0.72
+    max_results: 10
+  structured:
+    enabled: true
+    db_path: "/data/.hermes/memory.db"
+    importance_decay: 0.95
+    temporal_weight: true
+  flat:
+    enabled: true
+    memory_path: "/data/.hermes/memories/MEMORY.md"
+    user_path: "/data/.hermes/memories/USER.md"
+
+# -- Logging (structured) ---------------------------------------------------------
+logging:
+  level: info
+  format: json
+  structured: true
+  output:
+    - stdout
+    - file
+  file_path: "/data/.hermes/logs/hermes.log"
+  rotation:
+    max_size: "50m"
+    max_files: 10
+  audit:
+    enabled: true
+    path: "/data/.hermes/logs/audit.log"
+    events:
+      - tool_call
+      - model_call
+      - task_complete
+      - error
+      - security_event

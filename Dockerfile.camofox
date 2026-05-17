@@ -1,0 +1,102 @@
+# =============================================================================
+# Rhodawk AI — Camofox Stealth Browser  v3.1
+#
+# Builds jo-inc/camofox-browser from source at a pinned commit SHA.
+# camoufox-js (the main dependency) downloads its own patched Camoufox Firefox
+# during `npm install` postinstall — this is NOT Chromium.
+#
+# CRITICAL: Do NOT set PUPPETEER_EXECUTABLE_PATH in docker-compose env vars.
+# camoufox-js manages the patched Firefox binary path internally. Overriding
+# with Chromium disables the C++ fingerprint spoofing (navigator.hardwareConcurrency,
+# WebGL renderers, AudioContext, screen geometry, WebRTC spoofed at the C++ level).
+#
+# What this image provides (REST API on port 9377):
+#   POST /tabs                    — open a new browser tab
+#   GET  /tabs/:id/snapshot       — accessibility snapshot (~90% smaller than HTML)
+#   POST /tabs/:id/click          — click an element by stable ref (e1, e2, e3…)
+#   POST /tabs/:id/type           — type into a field
+#   GET  /tabs/:id/screenshot     — base64 PNG screenshot
+#   POST /tabs/:id/extract        — structured JSON extraction via JSON Schema
+#   GET  /tabs/:id/transcript     — YoUTube transcript via yt-dlp (no API key)
+#   GET  /search?q=QUERY&engine=google|youtube|amazon|reddit — search macros
+#   OpenAPI docs: http://localhost:9377/docs
+#
+# Changes v3.0 -> v3.1:
+#   - node:20-slim -> node:22-slim (matches official jo-inc/camofox-browser Dockerfile)
+#   - Replaced libasound2 with libasound2t64 (Debian Bookworm rename)
+#   - Removed libxss1 (dropped in Debian Bookworm)
+#   - Removed libatk-bridge2.0-0, libatk1.0-0, libcups2, libdbus-1-3, libnss3,
+#     libx11-6, libxext6, xdg-utils (not required by camoufox-js)
+#   - Added libdbus-glib-1-2, libxt6, libx11-xcb1, libxcursor1, libxi6,
+#     libxrender1, libegl1-mesa, libgl1-mesa-dri, xvfb, unzip, fontconfig,
+#     fonts-noto-color-emoji (required by Camoufox Firefox, per official Dockerfile)
+#
+# Build: docker build -f Dockerfile.camofox -t rhodawk-camofox .
+# Run:   docker run -d --name camofox -p 9377:9377 \
+#          -e CAMOFOX_ACCESS_KEY=your-secret-key rhodawk-camofox
+# =============================================================================
+
+FROM node:22-slim
+
+# System packages aligned with the official jo-inc/camofox-browser Dockerfile.
+# node:22-slim is Debian Bookworm — package names differ from Ubuntu/Debian Bullseye:
+#   libasound2t64 -> libasound2 (t64 suffix only exists in Debian Trixie/13, not Bookworm/12)
+#   libxss1       -> removed (no replacement needed for headless mode)
+RUN apt-get update -q && apt-get install -y -q --no-install-recommends \
+    git \
+    curl \
+    unzip \
+    ca-certificates \
+    python3-minimal \
+    python3-pip \
+    fontconfig \
+    fonts-liberation \
+    fonts-noto-color-emoji \
+    libgtk-3-0 \
+    libdbus-glib-1-2 \
+    libxt6 \
+    libasound2 \
+    libx11-xcb1 \
+    libxcomposite1 \
+    libxcursor1 \
+    libxdamage1 \
+    libxfixes3 \
+    libxi6 \
+    libxrandr2 \
+    libxrender1 \
+    libxtst6 \
+    libegl1-mesa \
+    libgl1-mesa-dri \
+    libgbm1 \
+    xvfb \
+    && pip3 install --no-cache-dir --break-system-packages yt-dlp \
+    && yt-dlp --version \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /app
+
+# Clone at build time — pinned to a specific commit SHA for reproducible builds.
+# To update: change CAMOFOX_SHA to the latest commit on master.
+# Latest SHA as of 2026-05-14: verify at github.com/jo-inc/camofox-browser/commits/master
+ARG CAMOFOX_SHA=c9a90dafc76d2dfa0eb5d74fa36ef28f3ba98b29
+RUN git clone https://github.com/jo-inc/camofox-browser.git . \
+    && git checkout ${CAMOFOX_SHA}
+
+# Install Node.js dependencies at build time.
+# camoufox-js postinstall downloads the patched Camoufox Firefox binary (~150MB).
+# This is the real anti-detection Firefox — NOT Chromium.
+RUN npm install
+
+# Verify server.js is present and node can parse it
+RUN node --check server.js \
+    && echo "[camofox] server.js syntax OK"
+
+EXPOSE 9377
+
+# Healthcheck: the /health endpoint returns HTTP 200 when the browser pool is ready.
+# start_period=60s: allow time for the Camoufox Firefox process to launch.
+HEALTHCHECK --interval=15s --timeout=5s --retries=5 --start-period=60s \
+    CMD curl -fsS http://localhost:9377/health || exit 1
+
+# npm start — instant on container start (all deps baked at build time)
+CMD ["npm", "start"]

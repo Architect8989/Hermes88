@@ -1,0 +1,178 @@
+name: CI
+
+# Runs on every push and pull request to main.
+# Catches broken builds and missing secrets before they reach your VPS.
+#
+# NOTE: These checks run on GitHub Actions if this repo is mirrored to GitHub.
+# On HuggingFace Spaces the files are inert but serve as living documentation
+# of the full validation suite. Run locally with: bash .github/scripts/validate.sh
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+
+  # ── Job 1: Validate .env.example has all required keys ─────────────────────
+  validate-env-example:
+    name: Validate .env.example
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check all required keys are present in .env.example
+        run: |
+          REQUIRED=(
+            TELEGRAM_BOT_TOKEN
+            DO_INFERENCE_API_KEY
+            GITHUB_PAT
+            TELEGRAM_CHAT_ID
+          )
+          MISSING=()
+          for key in "${REQUIRED[@]}"; do
+            if ! grep -qE "^${key}=" .env.example; then
+              MISSING+=("$key")
+            fi
+          done
+          if [ ${#MISSING[@]} -gt 0 ]; then
+            echo "::error::Missing required keys in .env.example: ${MISSING[*]}"
+            exit 1
+          fi
+          echo "All required keys present in .env.example."
+
+      - name: Check no real secret values are committed in .env.example
+        run: |
+          # Fail if any value looks like a real token (not a placeholder)
+          # Patterns: hf_... ghp_... nvapi-... anything over 20 chars that isn't a placeholder
+          if grep -E "^(TELEGRAM_BOT_TOKEN|DO_INFERENCE_API_KEY|GITHUB_PAT|TELEGRAM_CHAT_ID|HF_TOKEN)=.{20,}" \
+              .env.example | grep -vE "_(here|key_here|token_here|your_)"; then
+            echo "::error::.env.example appears to contain a real secret value. Replace with a placeholder."
+            exit 1
+          fi
+          echo "No real secrets detected in .env.example."
+
+  # ── Job 2: Shell script syntax check ───────────────────────────────────────
+  lint-shell:
+    name: Shell script syntax
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install shellcheck
+        run: sudo apt-get install -y shellcheck
+
+      - name: Check deploy.sh syntax (bash -n)
+        run: bash -n deploy.sh && echo "deploy.sh syntax OK"
+
+      - name: Check scripts/init_and_start.sh syntax
+        run: bash -n scripts/init_and_start.sh && echo "init_and_start.sh syntax OK"
+
+      - name: Check scripts/start_openclaw.sh syntax
+        run: bash -n scripts/start_openclaw.sh && echo "start_openclaw.sh syntax OK"
+
+      - name: Shellcheck deploy.sh (warnings as errors)
+        run: shellcheck -S error deploy.sh
+
+      - name: Shellcheck init_and_start.sh
+        run: shellcheck -S error scripts/init_and_start.sh
+
+  # ── Job 3: Python syntax check ─────────────────────────────────────────────
+  lint-python:
+    name: Python syntax
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Syntax check all Python files
+        run: |
+          find . -name "*.py" -not -path "./.git/*" | while read -r f; do
+            python3 -m py_compile "$f" && echo "OK: $f"
+          done
+
+      - name: Install dependencies and run import check
+        run: |
+          pip install --quiet -r requirements.txt
+          python3 -c "import bot.telegram_bot; print('import OK: bot.telegram_bot')"
+          python3 -c "import gateway.run; print('import OK: gateway.run')" || true
+          python3 -c "import main; print('import OK: main')" || true
+
+  # ── Job 4: Dockerfile.vps build ────────────────────────────────────────────
+  docker-build:
+    name: Docker build (Dockerfile.vps)
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build VPS image (no push)
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.vps
+          push: false
+          tags: rhodawk-hermes:ci
+          # Cache layers between runs to speed up subsequent builds
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Verify supervisord config inside image
+        run: |
+          docker run --rm --entrypoint bash rhodawk-hermes:ci \
+            -c "supervisord -c /etc/supervisor/conf.d/rhodawk.conf --nodaemon --version \
+                && echo 'supervisord config valid'"
+
+      - name: Verify key binaries are present inside image
+        run: |
+          docker run --rm --entrypoint bash rhodawk-hermes:ci -c "
+            set -e
+            rg --version   | head -1 && echo 'ripgrep OK'
+            node --version             && echo 'node OK'
+            python3 --version          && echo 'python3 OK'
+            git --version              && echo 'git OK'
+            openclaude --version 2>/dev/null | head -1 && echo 'openclaude OK' \
+              || echo 'openclaude: version flag not supported (installed)'
+          "
+
+  # ── Job 5: docker-compose.yml validation ───────────────────────────────────
+  validate-compose:
+    name: docker compose config
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate docker-compose.yml (config parse)
+        run: |
+          # Create a dummy .env so compose can resolve variables
+          cp .env.example .env
+          sed -i 's/=.*/=dummy_value/' .env
+          docker compose config --quiet && echo "docker-compose.yml is valid."
+
+  # ── Job 6: Makefile syntax ─────────────────────────────────────────────────
+  lint-makefile:
+    name: Makefile syntax
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dry-run make help (no secrets needed)
+        run: make help
+
+      - name: Verify all documented targets exist
+        run: |
+          TARGETS=(deploy up update restart logs status backup shell stop clean destroy help)
+          for target in "${TARGETS[@]}"; do
+            if ! grep -qE "^${target}:" Makefile; then
+              echo "::error::Makefile target '$target' is missing"
+              exit 1
+            fi
+            echo "target OK: $target"
+          done

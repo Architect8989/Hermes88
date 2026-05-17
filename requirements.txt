@@ -1,0 +1,76 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# Rhodawk AI — Hermes88 requirements.txt  v6.0 (Dead Code Purge)
+#
+# Trimmed per HERMES88_PEAK_REPORT: removed ~18 packages that exclusively
+# served dead rhodawk_core/ code. rhodawk_core/ has been deleted.
+#
+# Packages removed:
+#   mem0ai, chromadb, sentence-transformers — MemoryEngine (dead)
+#   litellm, pydantic-ai, pydantic         — orchestrator (dead)
+#   dramatiq[redis], celery[redis]         — task queue (dead)
+#   apscheduler                            — hermes-agent has its own
+#   discord.py, slack-sdk                  — openclaw handles multi-channel
+#   stripe                                 — skills/financial-stripe installs separately
+#   google-api-python-client, google-auth-* — skills/calendar-google installs separately
+#   pypandoc                               — skills/document-generation installs separately
+#   openai-whisper                         — heavy; skills/voice-transcription installs separately
+#   browser-use, playwright                — heavy; never called by live code
+#   asyncio-mqtt, watchfiles               — event_bus.py (dead)
+#   python-frontmatter                     — only used in dead synthesis.py
+#
+# Install: pip3 install -r requirements.txt
+# ─────────────────────────────────────────────────────────────────────────────
+
+# ── MCP (Model Context Protocol) client ──────────────────────────────────────
+mcp>=1.0.0
+
+# ── gRPC stack (openclaude gRPC client / server stubs) ───────────────────────
+grpcio>=1.62.0
+grpcio-tools>=1.62.0
+protobuf>=4.25.0
+
+# ── OpenAI-compatible client ──────────────────────────────────────────────────
+openai>=1.0.0
+
+# ── HTTP clients ──────────────────────────────────────────────────────────────
+requests>=2.31.0
+aiohttp>=3.9.0
+aiofiles>=23.2.0
+httpx>=0.27.0
+
+# ── Telegram bot SDK ──────────────────────────────────────────────────────────
+python-telegram-bot>=20.7
+
+# ── HuggingFace integration ───────────────────────────────────────────────────
+huggingface_hub>=0.21.0
+
+# ── Media / document ingestion ────────────────────────────────────────────────
+PyMuPDF>=1.23.0
+pdfminer.six>=20221105
+pillow>=10.0.0
+
+# ── Web search (zero-API-key fallback) ────────────────────────────────────────
+duckduckgo-search>=6.0.0
+
+# ── Data (Redis client, SQLite utilities) ─────────────────────────────────────
+redis[hiredis]>=5.0.0
+sqlite-utils>=3.35.0
+
+# ── RSS feed monitoring (skills/rss-monitor) ──────────────────────────────────
+feedparser>=6.0.0
+
+# ── Web framework (internal health/API endpoints) ─────────────────────────────
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+
+# ── Security scanning (skills/security-audit) ────────────────────────────────
+bandit>=1.7.0
+safety>=3.0.0
+semgrep>=1.0.0
+
+# ── YAML parsing (MCP tool loader, config expansion) ──────────────────────────
+pyyaml>=6.0.0
+
+# ── Build utilities ────────────────────────────────────────────────────────────
+setuptools>=69.0.0
+wheel>=0.43.0

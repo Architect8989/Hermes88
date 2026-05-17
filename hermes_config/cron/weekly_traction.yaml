@@ -1,0 +1,14 @@
+name: weekly-traction-report
+schedule: "0 9 * * 1"          # 9 AM every Monday
+platform: telegram
+description: >
+  Weekly Rhodawk traction report: PRs opened, tests fixed, repos processed.
+  Format as investor-ready metrics snapshot.
+task: |
+  COMPLETED=$(wc -l < /data/completed_repos.txt 2>/dev/null || echo 0)
+  echo "RHODAWK WEEKLY — $(date +%Y-%m-%d)"
+  echo "Repos processed: $COMPLETED"
+  echo "PRs opened this week: $(curl -s -H "Authorization: token ${GITHUB_PAT}" \
+  "https://api.github.com/repos/Architect8989/Hermes88/commits?since=$(python3 -c "from datetime import datetime,timedelta,timezone; print((datetime.now(timezone.utc)-timedelta(days=7)).strftime('%Y-%m-%dT%H:%M:%SZ'))")&per_page=100" \
+  | python3 -c "import json,sys; data=json.load(sys.stdin); print(f'Commits this week: {len(data) if isinstance(data, list) else 0}')")"
+  echo "Active target list: $(wc -l < /data/target_list.json 2>/dev/null || echo unknown) repos"

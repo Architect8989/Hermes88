@@ -1,0 +1,4 @@
+// go.sum is intentionally empty.
+// Run `go mod tidy` with network access to populate this file before building.
+// The Dockerfile.sandbox-manager uses `go mod download` which requires this file.
+// On first clone: cd sandbox && go mod tidy && git add go.sum

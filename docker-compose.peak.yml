@@ -1,0 +1,276 @@
+# =============================================================================
+# Rhodawk AI - Hermes88 Peak Architecture
+# docker compose deployment (Peak v1.0)
+#
+# Services:
+#   hermes        - Main AI orchestration engine (Python + supervisord)
+#   redis         - Redis Stack with RediSearch + ReJSON (vector memory, task queue)
+#   camofox       - Headless browser automation via Camofox
+#   webhook-receiver - TypeScript webhook server (GitHub, Stripe, system events)
+#   sandbox-manager  - Go-based ephemeral container manager
+#
+# Deploy:
+#   cp .env.example .env && nano .env   # fill in all required secrets
+#   docker compose -f docker-compose.peak.yml up -d --build
+#
+# Manage:
+#   docker compose -f docker-compose.peak.yml logs -f
+#   docker compose -f docker-compose.peak.yml ps
+#   docker compose -f docker-compose.peak.yml restart
+#   docker compose -f docker-compose.peak.yml down
+# =============================================================================
+
+services:
+  # ---------------------------------------------------------------------------
+  # HERMES - Main AI orchestration engine
+  # Runs: gateway, openclaude-grpc, jcode, event-router, task-workers, watchdog
+  # ---------------------------------------------------------------------------
+  hermes:
+    build:
+      context: .
+      dockerfile: Dockerfile.vps
+    image: rhodawk-hermes:peak
+    pull_policy: never
+    container_name: hermes-peak
+    env_file: .env
+    environment:
+      # Model assignments
+      - HERMES_MODEL=deepseek-v4-pro
+      - OPENCLAUDE_MODEL=deepseek-r1-distill-llama-70b
+      - JCODE_MODEL=kimi-k2.6
+      # Redis (sibling container)
+      - REDIS_URL=redis://redis:6379/0
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+      # Camofox (sibling container)
+      - CAMOFOX_HOST=camofox
+      - CAMOFOX_PORT=9377
+      # Webhook (sibling container)
+      - WEBHOOK_HOST=webhook-receiver
+      - WEBHOOK_PORT=9000
+      # Sandbox manager (sibling container)
+      - SANDBOX_MANAGER_HOST=sandbox-manager
+      - SANDBOX_MANAGER_PORT=8090
+      # Memory configuration
+      - MEMORY_DB_PATH=/data/.hermes/memory.db
+      - OBSIDIAN_VAULT_PATH=/data/.hermes/obsidian-vault
+      # Task engine
+      - TASK_WORKERS=5
+      - TASK_TIMEOUT=3600
+      # Event bus
+      - EVENT_BUS_REDIS_DB=1
+    depends_on:
+      redis:
+        condition: service_healthy
+    volumes:
+      # Persistent data: memory DB, sessions, logs, vault
+      - hermes-data:/data
+      # Docker socket for sandbox management health checks
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - supervisorctl
+        - -c
+        - /etc/supervisor/conf.d/rhodawk.conf
+        - status
+        - hermes-gateway
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - hermes-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # ---------------------------------------------------------------------------
+  # REDIS - Redis Stack with RediSearch + ReJSON
+  # Used for: vector memory store, task queue, event bus PubSub, caching
+  # ---------------------------------------------------------------------------
+  redis:
+    image: redis/redis-stack:latest
+    container_name: hermes-redis
+    ports:
+      - "127.0.0.1:6379:6379"
+      - "127.0.0.1:8001:8001"
+    environment:
+      - REDIS_ARGS=--appendonly yes --maxmemory 512mb --maxmemory-policy allkeys-lru
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - redis-cli
+        - ping
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+    networks:
+      - hermes-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # CAMOFOX - Anti-detection stealth browser (Camoufox Firefox, C++ patched)
+  # Provides: stealth browsing, accessibility snapshots, page extraction,
+  #           screenshot capture, YouTube transcripts, search macros
+  #
+  # Built from Dockerfile.camofox — clones jo-inc/camofox-browser from source,
+  # installs camoufox-js (which bundles its own patched Firefox at build time),
+  # and starts the REST API server at port 9377.
+  #
+  # IMPORTANT: do NOT set PUPPETEER_EXECUTABLE_PATH here. camoufox-js manages
+  # its own patched Firefox binary (downloaded by camoufox-js postinstall).
+  # Overriding this with Chromium disables the C++ fingerprint spoofing that
+  # makes Camoufox undetectable by Cloudflare and other bot detection systems.
+  # ---------------------------------------------------------------------------
+  camofox:
+    build:
+      context: .
+      dockerfile: Dockerfile.camofox
+    image: rhodawk-camofox:peak
+    pull_policy: never
+    container_name: hermes-camofox
+    ports:
+      - "9377:9377"
+    environment:
+      - CAMOFOX_ACCESS_KEY=${CAMOFOX_ACCESS_KEY}
+      - CAMOFOX_PORT=9377
+    volumes:
+      - camofox-data:/home/node/.camofox
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:9377/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+    networks:
+      - hermes-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # WEBHOOK-RECEIVER - TypeScript webhook server
+  # Handles: GitHub webhooks, Stripe events, system notifications
+  # ---------------------------------------------------------------------------
+  webhook-receiver:
+    build:
+      context: .
+      dockerfile: Dockerfile.webhook
+    image: rhodawk-webhook:peak
+    pull_policy: never
+    container_name: hermes-webhook
+    ports:
+      - "9000:9000"
+    environment:
+      - PORT=9000
+      - REDIS_URL=redis://redis:6379/0
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET}
+      - STRIPE_API_KEY=${STRIPE_API_KEY}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - TELEGRAM_CHAT_ID=${TELEGRAM_CHAT_ID}
+      - NODE_ENV=production
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:9000/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    networks:
+      - hermes-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+  # ---------------------------------------------------------------------------
+  # SANDBOX-MANAGER - Go-based ephemeral container manager
+  # Provides: isolated code execution, language sandboxes, resource limits
+  # ---------------------------------------------------------------------------
+  sandbox-manager:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox-manager
+    image: rhodawk-sandbox-manager:peak
+    pull_policy: never
+    container_name: hermes-sandbox-manager
+    environment:
+      - PORT=8090
+      - REDIS_URL=redis://redis:6379/0
+      - DOCKER_HOST=unix:///var/run/docker.sock
+      - SANDBOX_MAX_CONTAINERS=10
+      - SANDBOX_DEFAULT_TIMEOUT=300
+      - SANDBOX_MAX_MEMORY=512m
+      - SANDBOX_MAX_CPU=1.0
+      - SANDBOX_NETWORK_ENABLED=false
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test:
+        - CMD
+        - curl
+        - -f
+        - http://localhost:8090/health
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+    networks:
+      - hermes-net
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "3"
+
+# ---------------------------------------------------------------------------
+# VOLUMES
+# ---------------------------------------------------------------------------
+volumes:
+  hermes-data:
+    driver: local
+  redis-data:
+    driver: local
+  camofox-data:
+    driver: local
+
+# ---------------------------------------------------------------------------
+# NETWORKS
+# ---------------------------------------------------------------------------
+networks:
+  hermes-net:
+    driver: bridge
