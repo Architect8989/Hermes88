@@ -1,0 +1,6 @@
+.env
+skills/jcode_swarm/__pycache__/
+skills/openclaude_grpc/__pycache__/
+skills/openclaude_grpc/openclaude_pb2.py
+skills/openclaude_grpc/openclaude_pb2_grpc.py
+verification_engine.py
